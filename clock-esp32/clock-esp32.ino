@@ -4,7 +4,7 @@
 
 #define LED_PIN     4
 #define NUM_LEDS    60   
-#define BRIGHTNESS  30 
+#define BRIGHTNESS  20  
 
 RTC_DS3231 rtc;
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -14,9 +14,6 @@ void setup() {
   if (!rtc.begin()) {
     while (1);
   }
-  if (rtc.lostPower()) {
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-  }
   strip.begin();
   strip.setBrightness(BRIGHTNESS);
   strip.show(); 
@@ -25,7 +22,7 @@ void setup() {
 void loop() {
   DateTime now = rtc.now();
   updateClockDisplay(now);
-  delay(20); 
+  delay(10); 
 }
 
 void updateClockDisplay(DateTime t) {
@@ -34,24 +31,30 @@ void updateClockDisplay(DateTime t) {
   int hr = t.hour() % 12;
   int mn = t.minute();
   int sc = t.second();
-
   int hrPos = (hr * 5) + (mn / 12); 
 
   for (int i = 0; i <= mn; i++) {
-    strip.setPixelColor(i, strip.Color(0, 50, 0)); 
+    strip.setPixelColor(i, strip.Color(50, 15, 0));
   }
 
   for (int i = 0; i < 60; i += 5) {
     if (i == 0 || i == 15 || i == 30 || i == 45) {
-      strip.setPixelColor(i, strip.Color(0, 0, 255)); 
+      strip.setPixelColor(i, strip.Color(200, 200, 200));
     } else {
-      strip.setPixelColor(i, strip.Color(0, 0, 30)); 
+      strip.setPixelColor(i, strip.Color(30, 30, 30));
     }
   }
 
-  strip.setPixelColor(mn, strip.Color(255, 0, 0));
-  strip.setPixelColor(hrPos, strip.Color(255, 0, 0));
-  strip.setPixelColor(sc, Wheel(((millis() / 10) & 255))); 
+  strip.setPixelColor(mn, strip.Color(255, 40, 0)); 
+
+  if (millis() % 2000 < 1900) { 
+    strip.setPixelColor(hrPos, strip.Color(255, 0, 0));
+  } else {
+    strip.setPixelColor(hrPos, strip.Color(0, 0, 0));
+  }
+
+  strip.setPixelColor(sc, Wheel(((millis() / 15) & 255))); 
+  
   strip.show();
 }
 
