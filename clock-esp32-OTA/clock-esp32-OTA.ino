@@ -18,6 +18,11 @@ const char* password = "password";
 #define BUTTON_MIN_UP    13
 #define BUTTON_MIN_DOWN  14
 
+#define NIGHT_START_HOUR  20
+#define DAY_START_HOUR    8
+#define BRIGHTNESS_DAY    70
+#define BRIGHTNESS_NIGHT  30
+
 RTC_DS3231 rtc;
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -28,11 +33,13 @@ Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 #define C_DAKIKA_UC  strip.Color(255, 40,  0)
 #define C_SAAT       strip.Color(0,   255, 0)
 
-int  currentMode   = 0;
-int  lastHour      = -1;
-bool animRunning   = false;
-int  animStep      = 0;
+int  currentMode  = 0;
+int  lastHour     = -1;
+bool animRunning  = false;
+int  animStep     = 0;
 unsigned long lastAnimUpdate = 0;
+bool isNightMode  = false;
+bool autoNight    = true;
 
 void adjustTime(int hourChange, int minChange) {
     DateTime now = rtc.now();
@@ -80,6 +87,22 @@ void updateClockDisplay(DateTime t) {
     strip.show();
 }
 
+void checkDayNight(int hour) {
+    if (!autoNight) return;
+
+    bool shouldBeNight = (hour >= NIGHT_START_HOUR || hour < DAY_START_HOUR);
+
+    if (shouldBeNight && !isNightMode) {
+        isNightMode = true;
+        strip.setBrightness(BRIGHTNESS_NIGHT);
+        Serial.println("Gece moduna gecildi.");
+    } else if (!shouldBeNight && isNightMode) {
+        isNightMode = false;
+        strip.setBrightness(BRIGHTNESS_DAY);
+        Serial.println("Gunduz moduna gecildi.");
+    }
+}
+
 void runHourAnimation() {
     if (millis() - lastAnimUpdate < 15) return;
     lastAnimUpdate = millis();
@@ -90,23 +113,20 @@ void runHourAnimation() {
     int ledPos = animStep % 60;
 
     for (int i = 0; i < 60; i++) {
-        strip.setPixelColor(i, strip.Color(5, 5, 5));  // iz
+        strip.setPixelColor(i, strip.Color(5, 5, 5));
     }
-    // Aktif LED gökkuşağı
-    strip.setPixelColor(ledPos,       Wheel((ledPos * 4) & 255));
-    // Yanındakiler biraz daha parlak (kuyruk efekti)
+    strip.setPixelColor(ledPos,             Wheel((ledPos * 4) & 255));
     strip.setPixelColor((ledPos + 59) % 60, Wheel(((ledPos - 1) * 4) & 255));
     strip.setPixelColor((ledPos + 58) % 60, strip.Color(20, 20, 20));
 
     strip.show();
-
     animStep++;
 
     if (animStep >= 120) {
         animRunning = false;
         animStep    = 0;
         currentMode = 0;
-        strip.setBrightness(BRIGHTNESS);
+        strip.setBrightness(isNightMode ? BRIGHTNESS_NIGHT : BRIGHTNESS_DAY);
         Serial.println("Saat basi animasyonu bitti, normal moda donuldu.");
     }
 }
@@ -117,10 +137,10 @@ void handleSerialCommands() {
     cmd.trim();
 
     if (cmd == "mode0") {
-        currentMode  = 0;
-        animRunning  = false;
-        animStep     = 0;
-        strip.setBrightness(BRIGHTNESS);
+        currentMode = 0;
+        animRunning = false;
+        animStep    = 0;
+        strip.setBrightness(isNightMode ? BRIGHTNESS_NIGHT : BRIGHTNESS_DAY);
         Serial.println("Mod: Normal saat");
     }
     else if (cmd == "mode1") {
@@ -129,9 +149,33 @@ void handleSerialCommands() {
         animStep    = 0;
         Serial.println("Mod: Saat basi animasyonu (manuel)");
     }
+    else if (cmd == "night on") {
+        isNightMode = true;
+        autoNight   = false;
+        strip.setBrightness(BRIGHTNESS_NIGHT);
+        Serial.println("Gece modu: ACIK (manuel)");
+    }
+    else if (cmd == "night off") {
+        isNightMode = false;
+        autoNight   = false;
+        strip.setBrightness(BRIGHTNESS_DAY);
+        Serial.println("Gece modu: KAPALI (manuel)");
+    }
+    else if (cmd == "night auto") {
+        autoNight = true;
+        checkDayNight(rtc.now().hour());
+        Serial.println("Gece modu: OTOMATIK");
+    }
+    else if (cmd == "status") {
+        DateTime now = rtc.now();
+        Serial.printf("Saat: %02d:%02d:%02d\n", now.hour(), now.minute(), now.second());
+        Serial.printf("Mod: %d | Gece: %s | Otomatik: %s\n",
+            currentMode,
+            isNightMode ? "ACIK" : "KAPALI",
+            autoNight   ? "EVET" : "HAYIR");
+    }
     else {
-        Serial.printf("Bilinmeyen komut: %s\n", cmd.c_str());
-        Serial.println("Komutlar: mode0, mode1");
+        Serial.println("Komutlar: mode0, mode1, night on, night off, night auto, status");
     }
 }
 
@@ -178,8 +222,10 @@ void setup() {
     strip.show();
 
     lastHour = rtc.now().hour();
+    checkDayNight(lastHour);
+
     Serial.println("System ready!");
-    Serial.println("Komutlar: mode0, mode1");
+    Serial.println("Komutlar: mode0, mode1, night on, night off, night auto, status");
 }
 
 void loop() {
@@ -187,12 +233,19 @@ void loop() {
     handleSerialCommands();
 
     DateTime now = rtc.now();
+
     if (now.minute() == 0 && now.second() == 0 && now.hour() != lastHour) {
         lastHour    = now.hour();
         currentMode = 1;
         animRunning = true;
         animStep    = 0;
         Serial.printf("Saat basi: %02d:00 - Animasyon basliyor!\n", lastHour);
+    }
+
+    static unsigned long lastNightCheck = 0;
+    if (millis() - lastNightCheck >= 60000) {
+        lastNightCheck = millis();
+        checkDayNight(now.hour());
     }
 
     if (currentMode == 0) {
