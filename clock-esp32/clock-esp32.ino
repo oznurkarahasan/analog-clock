@@ -48,7 +48,7 @@ void updateClockDisplay(DateTime t) {
   strip.setPixelColor(mn, strip.Color(255, 40, 0)); 
 
   if (millis() % 2000 < 1900) { 
-    strip.setPixelColor(hrPos, strip.Color(255, 0, 0));
+    strip.setPixelColor(hrPos, strip.Color(0, 255, 0));
   } else {
     strip.setPixelColor(hrPos, strip.Color(0, 0, 0));
   }
