@@ -6,97 +6,213 @@
 #include <RTClib.h>
 #include <Adafruit_NeoPixel.h>
 
-const char* ssid = "wifi";
+const char* ssid     = "wifi";
 const char* password = "password";
 
-#define LED_PIN     4   
-#define NUM_LEDS    60  
-#define BRIGHTNESS  20 
+#define LED_PIN     4
+#define NUM_LEDS    60
+#define BRIGHTNESS  20
+
+#define BUTTON_HOUR_UP   25
+#define BUTTON_HOUR_DOWN 26
+#define BUTTON_MIN_UP    13
+#define BUTTON_MIN_DOWN  14
 
 RTC_DS3231 rtc;
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
-void setup() {
-  Serial.begin(115200);
+#define C_BLANK      strip.Color(0,   0,   0)
+#define C_ISARET_ANA strip.Color(200, 200, 200)
+#define C_ISARET_ARA strip.Color(30,  30,  30)
+#define C_DAKIKA_DOL strip.Color(50,  15,  0)
+#define C_DAKIKA_UC  strip.Color(255, 40,  0)
+#define C_SAAT       strip.Color(0,   255, 0)
 
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  
-  ArduinoOTA.setHostname("analog-clock-ESP32");
-  ArduinoOTA.begin();
+int  currentMode   = 0;
+int  lastHour      = -1;
+bool animRunning   = false;
+int  animStep      = 0;
+unsigned long lastAnimUpdate = 0;
 
-  if (!rtc.begin()) {
-    Serial.println("RTC not found!");
-    while (1); 
-  }
-
-  if (rtc.lostPower()) {
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-  }
-
-  strip.begin();
-  strip.setBrightness(BRIGHTNESS);
-  strip.show(); 
-  Serial.println("\nsystem ready!");
-}
-
-void loop() {
-  ArduinoOTA.handle(); 
-  
-  static unsigned long lastUpdate = 0;
-  if (millis() - lastUpdate >= 20) {
-    lastUpdate = millis();
+void adjustTime(int hourChange, int minChange) {
     DateTime now = rtc.now();
-    updateClockDisplay(now);
-  }
-}
-
-void updateClockDisplay(DateTime t) {
-  strip.clear();
-
-  int hr = t.hour() % 12;
-  int mn = t.minute();
-  int sc = t.second();
-  int hrPos = (hr * 5) + (mn / 12); 
-
-  for (int i = 0; i <= mn; i++) {
-    strip.setPixelColor(i, strip.Color(50, 15, 0));
-  }
-
-  for (int i = 0; i < 60; i += 5) {
-    if (i == 0 || i == 15 || i == 30 || i == 45) {
-      strip.setPixelColor(i, strip.Color(200, 200, 200));
-    } else {
-      strip.setPixelColor(i, strip.Color(30, 30, 30));
-    }
-  }
-
-  strip.setPixelColor(mn, strip.Color(255, 40, 0)); 
-
-  if (millis() % 2000 < 1900) { 
-    strip.setPixelColor(hrPos, strip.Color(0, 255, 0));
-  } else {
-    strip.setPixelColor(hrPos, strip.Color(0, 0, 0));
-  }
-
-  strip.setPixelColor(sc, Wheel(((millis() / 15) & 255))); 
-  
-  strip.show();
+    int h = (now.hour()   + hourChange + 24) % 24;
+    int m = (now.minute() + minChange  + 60) % 60;
+    rtc.adjust(DateTime(now.year(), now.month(), now.day(), h, m, 0));
+    Serial.printf("Yeni zaman: %02d:%02d:00\n", h, m);
 }
 
 uint32_t Wheel(byte WheelPos) {
-  WheelPos = 255 - WheelPos;
-  if(WheelPos < 85) {
-    return strip.Color(255 - WheelPos * 3, 0, WheelPos * 3);
-  }
-  if(WheelPos < 170) {
-    WheelPos -= 85;
-    return strip.Color(0, WheelPos * 3, 255 - WheelPos * 3);
-  }
-  WheelPos -= 170;
-  return strip.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
+    WheelPos = 255 - WheelPos;
+    if (WheelPos < 85)  return strip.Color(255 - WheelPos * 3, 0, WheelPos * 3);
+    if (WheelPos < 170) { WheelPos -= 85; return strip.Color(0, WheelPos * 3, 255 - WheelPos * 3); }
+    WheelPos -= 170;
+    return strip.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
+}
+
+void updateClockDisplay(DateTime t) {
+    strip.clear();
+
+    int hr    = t.hour() % 12;
+    int mn    = t.minute();
+    int sc    = t.second();
+    int hrPos = (hr * 5) + (mn / 12);
+
+    for (int i = 0; i <= mn; i++) {
+        strip.setPixelColor(i, C_DAKIKA_DOL);
+    }
+    for (int i = 0; i < 60; i += 5) {
+        if (i == 0 || i == 15 || i == 30 || i == 45)
+            strip.setPixelColor(i, C_ISARET_ANA);
+        else
+            strip.setPixelColor(i, C_ISARET_ARA);
+    }
+
+    strip.setPixelColor(mn, C_DAKIKA_UC);
+
+    if (millis() % 2000 < 1900)
+        strip.setPixelColor(hrPos, C_SAAT);
+    else
+        strip.setPixelColor(hrPos, C_BLANK);
+
+    strip.setPixelColor(sc, Wheel((millis() / 15) & 255));
+
+    strip.show();
+}
+
+void runHourAnimation() {
+    if (millis() - lastAnimUpdate < 15) return;
+    lastAnimUpdate = millis();
+
+    strip.setBrightness(255);
+    strip.clear();
+
+    int ledPos = animStep % 60;
+
+    for (int i = 0; i < 60; i++) {
+        strip.setPixelColor(i, strip.Color(5, 5, 5));  // iz
+    }
+    // Aktif LED gökkuşağı
+    strip.setPixelColor(ledPos,       Wheel((ledPos * 4) & 255));
+    // Yanındakiler biraz daha parlak (kuyruk efekti)
+    strip.setPixelColor((ledPos + 59) % 60, Wheel(((ledPos - 1) * 4) & 255));
+    strip.setPixelColor((ledPos + 58) % 60, strip.Color(20, 20, 20));
+
+    strip.show();
+
+    animStep++;
+
+    if (animStep >= 120) {
+        animRunning = false;
+        animStep    = 0;
+        currentMode = 0;
+        strip.setBrightness(BRIGHTNESS);
+        Serial.println("Saat basi animasyonu bitti, normal moda donuldu.");
+    }
+}
+
+void handleSerialCommands() {
+    if (!Serial.available()) return;
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+
+    if (cmd == "mode0") {
+        currentMode  = 0;
+        animRunning  = false;
+        animStep     = 0;
+        strip.setBrightness(BRIGHTNESS);
+        Serial.println("Mod: Normal saat");
+    }
+    else if (cmd == "mode1") {
+        currentMode = 1;
+        animRunning = true;
+        animStep    = 0;
+        Serial.println("Mod: Saat basi animasyonu (manuel)");
+    }
+    else {
+        Serial.printf("Bilinmeyen komut: %s\n", cmd.c_str());
+        Serial.println("Komutlar: mode0, mode1");
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+
+    pinMode(BUTTON_HOUR_UP,   INPUT_PULLUP);
+    pinMode(BUTTON_HOUR_DOWN, INPUT_PULLUP);
+    pinMode(BUTTON_MIN_UP,    INPUT_PULLUP);
+    pinMode(BUTTON_MIN_DOWN,  INPUT_PULLUP);
+
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\nWiFi baglandi!");
+
+    ArduinoOTA.setHostname("analog-clock-ESP32");
+    ArduinoOTA.onEnd([]() {
+        Serial.println("\nOTA tamamlandi, yeniden baslatiliyor...");
+    });
+    ArduinoOTA.onError([](ota_error_t error) {
+        Serial.printf("OTA Hata [%u]: ", error);
+        if      (error == OTA_AUTH_ERROR)    Serial.println("Auth hatasi");
+        else if (error == OTA_BEGIN_ERROR)   Serial.println("Baslama hatasi");
+        else if (error == OTA_CONNECT_ERROR) Serial.println("Baglanti hatasi");
+        else if (error == OTA_RECEIVE_ERROR) Serial.println("Alma hatasi");
+        else if (error == OTA_END_ERROR)     Serial.println("Bitis hatasi");
+    });
+    ArduinoOTA.begin();
+
+    if (!rtc.begin()) {
+        Serial.println("RTC bulunamadi!");
+        while (1);
+    }
+    if (rtc.lostPower()) {
+        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    }
+
+    strip.begin();
+    strip.setBrightness(BRIGHTNESS);
+    strip.show();
+
+    lastHour = rtc.now().hour();
+    Serial.println("System ready!");
+    Serial.println("Komutlar: mode0, mode1");
+}
+
+void loop() {
+    ArduinoOTA.handle();
+    handleSerialCommands();
+
+    DateTime now = rtc.now();
+    if (now.minute() == 0 && now.second() == 0 && now.hour() != lastHour) {
+        lastHour    = now.hour();
+        currentMode = 1;
+        animRunning = true;
+        animStep    = 0;
+        Serial.printf("Saat basi: %02d:00 - Animasyon basliyor!\n", lastHour);
+    }
+
+    if (currentMode == 0) {
+        static unsigned long lastButtonCheck = 0;
+        if (millis() - lastButtonCheck >= 50) {
+            lastButtonCheck = millis();
+            if (digitalRead(BUTTON_HOUR_UP)   == LOW) adjustTime(1,  0);
+            if (digitalRead(BUTTON_HOUR_DOWN) == LOW) adjustTime(-1, 0);
+            if (digitalRead(BUTTON_MIN_UP)    == LOW) adjustTime(0,  1);
+            if (digitalRead(BUTTON_MIN_DOWN)  == LOW) adjustTime(0, -1);
+        }
+    }
+
+    if (currentMode == 1 && animRunning) {
+        runHourAnimation();
+    } else {
+        static unsigned long lastUpdate = 0;
+        if (millis() - lastUpdate >= 20) {
+            lastUpdate = millis();
+            updateClockDisplay(now);
+        }
+    }
 }
