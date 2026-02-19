@@ -5,6 +5,7 @@
 #include <Wire.h>
 #include <RTClib.h>
 #include <Adafruit_NeoPixel.h>
+#include <time.h>  // NTP için
 
 const char* ssid     = "wifi";
 const char* password = "password";
@@ -20,8 +21,12 @@ const char* password = "password";
 
 #define NIGHT_START_HOUR  20
 #define DAY_START_HOUR    8
-#define BRIGHTNESS_DAY    70
+#define BRIGHTNESS_DAY    20
 #define BRIGHTNESS_NIGHT  30
+
+#define NTP_SERVER    "pool.ntp.org"
+#define UTC_OFFSET    10800      // UTC+3 → 3 * 3600 saniye
+#define NTP_INTERVAL  86400000  // 24 saat (ms)
 
 RTC_DS3231 rtc;
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -40,6 +45,7 @@ int  animStep     = 0;
 unsigned long lastAnimUpdate = 0;
 bool isNightMode  = false;
 bool autoNight    = true;
+unsigned long lastNtpSync = 0;
 
 void adjustTime(int hourChange, int minChange) {
     DateTime now = rtc.now();
@@ -55,6 +61,12 @@ uint32_t Wheel(byte WheelPos) {
     if (WheelPos < 170) { WheelPos -= 85; return strip.Color(0, WheelPos * 3, 255 - WheelPos * 3); }
     WheelPos -= 170;
     return strip.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
+}
+
+uint8_t breathCalc() {
+    float t = (millis() % 3000) / 3000.0f;
+    float b = 0.3f + 0.7f * (1.0f - cos(t * 2.0f * PI)) / 2.0f;
+    return (uint8_t)(b * 255);
 }
 
 void updateClockDisplay(DateTime t) {
@@ -75,7 +87,8 @@ void updateClockDisplay(DateTime t) {
             strip.setPixelColor(i, C_ISARET_ARA);
     }
 
-    strip.setPixelColor(mn, C_DAKIKA_UC);
+    uint8_t br = breathCalc();
+    strip.setPixelColor(mn, strip.Color(br, (uint8_t)(br * 0.16f), 0));
 
     if (millis() % 2000 < 1900)
         strip.setPixelColor(hrPos, C_SAAT);
@@ -85,6 +98,43 @@ void updateClockDisplay(DateTime t) {
     strip.setPixelColor(sc, Wheel((millis() / 15) & 255));
 
     strip.show();
+}
+
+bool syncNTP() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("NTP: WiFi bagli degil, sync atlanıyor.");
+        return false;
+    }
+
+    Serial.println("NTP sync basliyor...");
+    configTime(UTC_OFFSET, 0, NTP_SERVER);
+
+    struct tm timeinfo;
+    int retry = 0;
+    while (!getLocalTime(&timeinfo) && retry < 10) {
+        delay(500);
+        retry++;
+        Serial.print(".");
+    }
+
+    if (retry >= 10) {
+        Serial.println("\nNTP sync basarisiz!");
+        return false;
+    }
+
+    rtc.adjust(DateTime(
+        timeinfo.tm_year + 1900,
+        timeinfo.tm_mon  + 1,
+        timeinfo.tm_mday,
+        timeinfo.tm_hour,
+        timeinfo.tm_min,
+        timeinfo.tm_sec
+    ));
+
+    lastNtpSync = millis();
+    Serial.printf("\nNTP sync OK → %02d:%02d:%02d\n",
+        timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    return true;
 }
 
 void checkDayNight(int hour) {
@@ -166,16 +216,21 @@ void handleSerialCommands() {
         checkDayNight(rtc.now().hour());
         Serial.println("Gece modu: OTOMATIK");
     }
+    else if (cmd == "ntp sync") {
+        syncNTP();
+    }
     else if (cmd == "status") {
         DateTime now = rtc.now();
+        unsigned long sinceSync = (millis() - lastNtpSync) / 1000;
         Serial.printf("Saat: %02d:%02d:%02d\n", now.hour(), now.minute(), now.second());
         Serial.printf("Mod: %d | Gece: %s | Otomatik: %s\n",
             currentMode,
             isNightMode ? "ACIK" : "KAPALI",
             autoNight   ? "EVET" : "HAYIR");
+        Serial.printf("Son NTP sync: %lu saniye once\n", sinceSync);
     }
     else {
-        Serial.println("Komutlar: mode0, mode1, night on, night off, night auto, status");
+        Serial.println("Komutlar: mode0, mode1, night on, night off, night auto, ntp sync, status");
     }
 }
 
@@ -214,18 +269,20 @@ void setup() {
         while (1);
     }
     if (rtc.lostPower()) {
-        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+        Serial.println("RTC guc kaybetti, NTP ile ayarlaniyor...");
     }
 
     strip.begin();
     strip.setBrightness(BRIGHTNESS);
     strip.show();
 
+    syncNTP();
+
     lastHour = rtc.now().hour();
     checkDayNight(lastHour);
 
     Serial.println("System ready!");
-    Serial.println("Komutlar: mode0, mode1, night on, night off, night auto, status");
+    Serial.println("Komutlar: mode0, mode1, night on, night off, night auto, ntp sync, status");
 }
 
 void loop() {
@@ -233,6 +290,10 @@ void loop() {
     handleSerialCommands();
 
     DateTime now = rtc.now();
+
+    if (millis() - lastNtpSync >= NTP_INTERVAL) {
+        syncNTP();
+    }
 
     if (now.minute() == 0 && now.second() == 0 && now.hour() != lastHour) {
         lastHour    = now.hour();
