@@ -19,6 +19,12 @@ const char* password = "password";
 #define BUTTON_MIN_UP    13
 #define BUTTON_MIN_DOWN  14
 
+#define LDR_PIN          34
+#define LDR_SAMPLE_COUNT 20       // hareketli ortalama için örnek sayısı
+#define LDR_READ_INTERVAL 500     // ms — her 500ms bir örnek al
+#define LDR_ABSENT_VALUE  4095    // LDR takılı değilse ADC bu değeri okur (pull-up yok = float)
+#define LDR_ABSENT_THRESHOLD 4000 // bu değerin üzerindeyse LDR yok say
+
 #define NIGHT_START_HOUR  20
 #define DAY_START_HOUR    8
 #define BRIGHTNESS_DAY    20
@@ -34,6 +40,7 @@ RTC_DS3231 rtc;
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 WebServer server(80);
 
+// ---- RENKLER ----
 uint8_t c_saat_r=0,  c_saat_g=255, c_saat_b=0;
 uint8_t c_dol_r=50,  c_dol_g=15,   c_dol_b=0;
 uint8_t c_uc_r=255,  c_uc_g=40,    c_uc_b=0;
@@ -41,6 +48,8 @@ uint8_t c_ana_r=200, c_ana_g=200,  c_ana_b=200;
 uint8_t c_ara_r=30,  c_ara_g=30,   c_ara_b=30;
 uint8_t brightness_day=20, brightness_night=30;
 
+// ---- MOD ----
+// 0=normal 1=saatbasi 2=alarm 3=nefes 4=meteor 5=radar
 int  currentMode  = 0;
 int  lastHour     = -1;
 bool animRunning  = false;
@@ -50,6 +59,21 @@ bool isNightMode  = false;
 bool autoNight    = true;
 unsigned long lastNtpSync = 0;
 
+// ---- LDR ----
+int  ldrSamples[LDR_SAMPLE_COUNT] = {0};
+int  ldrSampleIndex  = 0;
+int  ldrSampleFilled = 0;           // kaç örnek toplandı (başlangıçta buffer dolmamış)
+int  ldrFiltered     = 0;           // hareketli ortalama sonucu
+bool ldrPresent      = false;       // sensör takılı mı
+unsigned long lastLdrRead = 0;
+// Histerezis eşikleri (web'den ayarlanabilir)
+// ldrFiltered > ldrNightThreshold  → gece (karanlık)
+// ldrFiltered < ldrDayThreshold    → gündüz (aydınlık)
+// ldrDayThreshold < x < ldrNightThreshold → geçiş bölgesi, mevcut durum korunur
+int ldrNightThreshold = 2500;  // bu değerin üzerinde → gece
+int ldrDayThreshold   = 1500;  // bu değerin altında  → gündüz
+
+// ---- ALARM ----
 struct AlarmClock {
     int  hour    = 7;
     int  minute  = 0;
@@ -60,10 +84,68 @@ bool  alarmFiring     = false;
 unsigned long alarmStartTime  = 0;
 unsigned long lastAlarmUpdate = 0;
 
+// ---- ANİMASYON STATE ----
 unsigned long lastExtraAnimUpdate = 0;
 int  meteorPos    = 0;
 int  radarPos     = 0;
 uint8_t radarTrail[60] = {0};
+
+// =====================================================================
+// LDR FONKSİYONLARI
+// =====================================================================
+
+// Ham ADC oku, hareketli ortalamaya ekle
+void ldrUpdate() {
+    if (millis() - lastLdrRead < LDR_READ_INTERVAL) return;
+    lastLdrRead = millis();
+
+    int raw = analogRead(LDR_PIN);
+
+    // LDR takılı mı kontrol et
+    // Takılı değilse pin float kalır, genellikle çok yüksek veya tutarsız okur
+    // Birkaç örnek toplandıktan sonra ortalamaya bakarak karar ver
+    ldrSamples[ldrSampleIndex] = raw;
+    ldrSampleIndex = (ldrSampleIndex + 1) % LDR_SAMPLE_COUNT;
+    if (ldrSampleFilled < LDR_SAMPLE_COUNT) ldrSampleFilled++;
+
+    // Hareketli ortalama hesapla
+    long sum = 0;
+    for (int i = 0; i < ldrSampleFilled; i++) sum += ldrSamples[i];
+    ldrFiltered = (int)(sum / ldrSampleFilled);
+
+    // LDR varlık tespiti: buffer dolmuşsa ve ortalama çok yüksekse takılı değil
+    if (ldrSampleFilled >= LDR_SAMPLE_COUNT) {
+        // Tüm örnekler eşiğin üzerindeyse → LDR yok
+        bool allHigh = true;
+        for (int i = 0; i < LDR_SAMPLE_COUNT; i++) {
+            if (ldrSamples[i] < LDR_ABSENT_THRESHOLD) { allHigh = false; break; }
+        }
+        ldrPresent = !allHigh;
+    }
+}
+
+// LDR değerine göre gece/gündüz geçişini yönet
+// Histerezis: eşikler arası bölgede mevcut durum korunur
+void checkDayNightLDR() {
+    if (!ldrPresent) return;  // LDR yoksa saat bazlı kontrol devreye girer
+
+    bool shouldSwitch = false;
+    bool targetNight  = isNightMode;
+
+    if (ldrFiltered > ldrNightThreshold && !isNightMode) {
+        targetNight  = true;
+        shouldSwitch = true;
+    } else if (ldrFiltered < ldrDayThreshold && isNightMode) {
+        targetNight  = false;
+        shouldSwitch = true;
+    }
+
+    if (shouldSwitch) {
+        isNightMode = targetNight;
+        if (!alarmFiring && currentMode != 1)  // animasyon varsa parlaklığa dokunma
+            strip.setBrightness(isNightMode ? brightness_night : brightness_day);
+    }
+}
 
 void adjustTime(int hourChange, int minChange) {
     DateTime now = rtc.now();
@@ -173,44 +255,31 @@ void runAlarmAnimation() {
 void runBreathAnimation() {
     if (millis() - lastExtraAnimUpdate < 20) return;
     lastExtraAnimUpdate = millis();
-
     float t = (millis() % 4000) / 4000.0f;
-    float b = (1.0f - cos(t * 2.0f * PI)) / 2.0f;
-    b = 0.08f + 0.92f * b;
+    float b = 0.08f + 0.92f * (1.0f - cos(t * 2.0f * PI)) / 2.0f;
     uint8_t bright = (uint8_t)(b * 255);
-
     strip.setBrightness(255);
     uint8_t r = (uint8_t)(bright * 0.55f);
     uint8_t g = (uint8_t)(bright * 0.75f);
-    uint8_t bv = bright;
     for (int i = 0; i < 60; i++)
-        strip.setPixelColor(i, strip.Color(r, g, bv));
+        strip.setPixelColor(i, strip.Color(r, g, bright));
     strip.show();
 }
 
 void runMeteorAnimation() {
     if (millis() - lastExtraAnimUpdate < 30) return;
     lastExtraAnimUpdate = millis();
-
     strip.setBrightness(255);
-    strip.clear();
-
     for (int i = 0; i < 60; i++) {
         uint32_t c = strip.getPixelColor(i);
-        uint8_t r = (c >> 16) & 0xFF;
-        uint8_t g = (c >>  8) & 0xFF;
-        uint8_t b =  c        & 0xFF;
-        r = r > 10 ? r * 3 / 4 : 0;
-        g = g > 10 ? g * 3 / 4 : 0;
-        b = b > 10 ? b * 3 / 4 : 0;
+        uint8_t r = (c>>16)&0xFF, g = (c>>8)&0xFF, b = c&0xFF;
+        r = r>10?r*3/4:0; g = g>10?g*3/4:0; b = b>10?b*3/4:0;
         strip.setPixelColor(i, strip.Color(r, g, b));
     }
-
     uint8_t colorPos = (meteorPos * 4) & 255;
-    strip.setPixelColor(meteorPos,                   strip.Color(255, 255, 255));
-    strip.setPixelColor((meteorPos + 59) % 60,       Wheel(colorPos));
-    strip.setPixelColor((meteorPos + 58) % 60,       Wheel((colorPos + 20) & 255));
-
+    strip.setPixelColor(meteorPos,             strip.Color(255, 255, 255));
+    strip.setPixelColor((meteorPos+59)%60,     Wheel(colorPos));
+    strip.setPixelColor((meteorPos+58)%60,     Wheel((colorPos+20)&255));
     strip.show();
     meteorPos = (meteorPos + 1) % 60;
 }
@@ -218,26 +287,15 @@ void runMeteorAnimation() {
 void runRadarAnimation() {
     if (millis() - lastExtraAnimUpdate < 40) return;
     lastExtraAnimUpdate = millis();
-
     strip.setBrightness(255);
-
-    for (int i = 0; i < 60; i++) {
+    for (int i = 0; i < 60; i++)
         radarTrail[i] = radarTrail[i] > 15 ? radarTrail[i] - 15 : 0;
-    }
-
     radarTrail[radarPos] = 255;
-
     for (int i = 0; i < 60; i++) {
         uint8_t v = radarTrail[i];
-        if (v > 0) {
-            strip.setPixelColor(i, strip.Color(0, v, v / 4));
-        } else {
-            strip.setPixelColor(i, strip.Color(0, 0, 0));
-        }
+        strip.setPixelColor(i, v > 0 ? strip.Color(0, v, v/4) : strip.Color(0,0,0));
     }
-
     strip.setPixelColor(radarPos, strip.Color(100, 255, 200));
-
     strip.show();
     radarPos = (radarPos + 1) % 60;
 }
@@ -266,13 +324,17 @@ bool syncNTP() {
     return true;
 }
 
+// Saat bazlı gece/gündüz (LDR yoksa devreye girer)
 void checkDayNight(int hour) {
     if (!autoNight) return;
+    if (ldrPresent) return;  // LDR varsa bu fonksiyon devre dışı
     bool shouldBeNight = (hour >= NIGHT_START_HOUR || hour < DAY_START_HOUR);
     if (shouldBeNight && !isNightMode) {
-        isNightMode = true;  strip.setBrightness(brightness_night);
+        isNightMode = true;
+        strip.setBrightness(brightness_night);
     } else if (!shouldBeNight && isNightMode) {
-        isNightMode = false; strip.setBrightness(brightness_day);
+        isNightMode = false;
+        strip.setBrightness(brightness_day);
     }
 }
 
@@ -300,16 +362,19 @@ void checkAlarm(DateTime now) {
 }
 
 void startExtraAnim(int mode) {
-    currentMode          = mode;
-    lastExtraAnimUpdate  = 0;
-    meteorPos            = 0;
-    radarPos             = 0;
+    currentMode         = mode;
+    lastExtraAnimUpdate = 0;
+    meteorPos           = 0;
+    radarPos            = 0;
     memset(radarTrail, 0, sizeof(radarTrail));
     strip.setBrightness(255);
     strip.clear();
     strip.show();
 }
 
+// =====================================================================
+// HTML
+// =====================================================================
 
 const char HTML_PAGE[] PROGMEM = R"rawhtml(
 <!DOCTYPE html>
@@ -324,7 +389,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
 :root{
   --bg:#0a0a0a;--surface:#141414;--surface2:#1c1c1c;
   --border:#252525;--text:#e0e0e0;--muted:#555;--accent:#fff;
-  --green:#00e676;--red:#ff5252;--amber:#ffab40;
+  --green:#00e676;--red:#ff5252;--amber:#ffab40;--blue:#448aff;
 }
 body{background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;min-height:100vh}
 .header{padding:1.5rem 1.5rem 0;display:flex;justify-content:space-between;align-items:flex-start}
@@ -337,16 +402,16 @@ body{background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;min-
 .clock-sub{margin-top:0.5rem;font-size:0.6rem;color:var(--muted);
            letter-spacing:0.1em;display:flex;gap:1.5rem;flex-wrap:wrap}
 .dot{display:inline-block;width:5px;height:5px;border-radius:50%;margin-right:0.4rem;vertical-align:middle}
-.dot.on{background:var(--green)}
-.dot.off{background:var(--muted)}
+.dot.on{background:var(--green)}.dot.off{background:var(--muted)}
 .dot.red{background:var(--red);animation:dpulse 0.5s infinite alternate}
+.dot.blue{background:var(--blue)}
 @keyframes dpulse{to{opacity:0.2}}
 .alarm-badge{font-size:0.6rem;padding:0.15rem 0.45rem;border-radius:2px}
 .alarm-badge.on{background:var(--green);color:#000}
 .alarm-badge.firing{background:var(--red);color:#fff;animation:dpulse 0.4s infinite alternate}
 .tabs{display:flex;border-bottom:1px solid var(--border)}
-.tab{flex:1;padding:0.7rem 0.4rem;font-family:'DM Mono',monospace;font-size:0.58rem;
-     letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);background:none;
+.tab{flex:1;padding:0.7rem 0.3rem;font-family:'DM Mono',monospace;font-size:0.55rem;
+     letter-spacing:0.06em;text-transform:uppercase;color:var(--muted);background:none;
      border:none;border-bottom:2px solid transparent;cursor:pointer;transition:all 0.15s}
 .tab.active{color:var(--accent);border-bottom-color:var(--accent)}
 .tab-content{display:none;padding:1.25rem 1.5rem}
@@ -355,6 +420,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;min-
        padding:0.6rem 0;border-bottom:1px solid var(--border)}
 .field:last-child{border-bottom:none}
 .field-label{font-size:0.65rem;color:var(--muted);letter-spacing:0.04em}
+.field-label small{display:block;font-size:0.55rem;color:var(--muted);opacity:0.6;margin-top:0.1rem}
 input[type="color"]{width:2.2rem;height:1.8rem;border:1px solid var(--border);
                     background:none;cursor:pointer;padding:2px;border-radius:2px}
 input[type="range"]{width:110px;accent-color:var(--accent)}
@@ -362,7 +428,7 @@ input[type="number"]{background:var(--surface2);border:1px solid var(--border);
                      color:var(--text);padding:0.4rem 0.5rem;font-family:'DM Mono',monospace;
                      font-size:0.75rem;width:100%;text-align:center}
 input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--accent)}
-.range-val{font-size:0.65rem;color:var(--muted);width:2rem;text-align:right}
+.range-val{font-size:0.65rem;color:var(--muted);width:2.5rem;text-align:right}
 .slabel{font-size:0.58rem;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted);
         margin-bottom:0.5rem;margin-top:1rem;display:block}
 .slabel:first-child{margin-top:0}
@@ -393,6 +459,11 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
 .anim-card.running{border-color:var(--green);background:var(--surface2)}
 .anim-card-title{font-size:0.65rem;color:var(--text);letter-spacing:0.05em;display:block;margin-bottom:0.2rem}
 .anim-card-sub{font-size:0.58rem;color:var(--muted)}
+/* LDR bar */
+.ldr-bar-wrap{height:4px;background:var(--surface2);border:1px solid var(--border);margin-top:0.4rem;border-radius:2px}
+.ldr-bar{height:100%;background:var(--blue);border-radius:2px;transition:width 0.4s}
+.ldr-info{display:flex;justify-content:space-between;font-size:0.58rem;color:var(--muted);margin-top:0.25rem}
+.ldr-absent{font-size:0.6rem;color:var(--amber);margin-top:0.3rem}
 .toast{position:fixed;bottom:1.5rem;right:1.5rem;background:var(--surface2);
        color:var(--text);border:1px solid var(--border);padding:0.5rem 1rem;
        font-size:0.65rem;letter-spacing:0.07em;opacity:0;transition:opacity 0.2s;
@@ -413,6 +484,7 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
     <span><span class="dot off" id="dot-night"></span><span id="lbl-night">gündüz</span></span>
     <span><span class="dot off" id="dot-ntp"></span><span id="lbl-ntp">ntp —</span></span>
     <span><span class="dot on"  id="dot-mode"></span><span id="lbl-mode">normal</span></span>
+    <span><span class="dot off" id="dot-ldr"></span><span id="lbl-ldr">ldr —</span></span>
     <span id="alarm-badge-wrap" style="display:none">
       <span class="alarm-badge on" id="alarm-badge">—</span>
     </span>
@@ -468,13 +540,40 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
   </div>
   <button class="btn full" id="btn_night_auto" onclick="nightMode('auto')">otomatik</button>
 
+  <span class="slabel">ışık sensörü (ldr)</span>
+  <div id="ldr-section">
+    <div id="ldr-absent-msg" class="ldr-absent" style="display:none">⚠ sensör takılı değil — saat bazlı mod aktif</div>
+    <div id="ldr-present-section">
+      <div class="ldr-bar-wrap"><div class="ldr-bar" id="ldr-bar" style="width:0%"></div></div>
+      <div class="ldr-info">
+        <span id="ldr-val-txt">— / 4095</span>
+        <span id="ldr-state-txt">—</span>
+      </div>
+      <!-- Histerezis eşik ayarları -->
+      <div class="field" style="margin-top:0.75rem">
+        <span class="field-label">gece eşiği<small>üzeri → gece modu</small></span>
+        <input type="range" id="ldr_night_thr" min="500" max="4000" step="50"
+               oninput="document.getElementById('ldr_night_val').textContent=this.value"
+               onchange="setLdrThreshold('night',this.value)">
+        <span class="range-val" id="ldr_night_val">—</span>
+      </div>
+      <div class="field">
+        <span class="field-label">gündüz eşiği<small>altı → gündüz modu</small></span>
+        <input type="range" id="ldr_day_thr" min="100" max="3500" step="50"
+               oninput="document.getElementById('ldr_day_val').textContent=this.value"
+               onchange="setLdrThreshold('day',this.value)">
+        <span class="range-val" id="ldr_day_val">—</span>
+      </div>
+    </div>
+  </div>
+
   <span class="slabel">animasyonlar</span>
   <div class="anim-grid">
-    <div class="anim-card" id="anim_hour" onclick="triggerAnim('hour')">
+    <div class="anim-card" id="anim_hour"   onclick="triggerAnim('hour')">
       <span class="anim-card-title">saat başı</span>
       <span class="anim-card-sub">dönen gökkuşağı · 2 tur</span>
     </div>
-    <div class="anim-card" id="anim_alarm" onclick="triggerAnim('alarm')">
+    <div class="anim-card" id="anim_alarm"  onclick="triggerAnim('alarm')">
       <span class="anim-card-title">alarm efekti</span>
       <span class="anim-card-sub">karşıt renk dalgası · 15sn</span>
     </div>
@@ -486,7 +585,7 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
       <span class="anim-card-title">meteor</span>
       <span class="anim-card-sub">kuyruklu yıldız · solan iz</span>
     </div>
-    <div class="anim-card" id="anim_radar" onclick="triggerAnim('radar')">
+    <div class="anim-card" id="anim_radar"  onclick="triggerAnim('radar')">
       <span class="anim-card-title">radar</span>
       <span class="anim-card-sub">dönen yeşil tarama</span>
     </div>
@@ -575,7 +674,6 @@ function onAlarmBlur() {
   }, 200);
 }
 
-// mod_num → animasyon kartı eşleşmesi
 const MODE_TO_ANIM = {1:'hour', 2:'alarm', 3:'breath', 4:'meteor', 5:'radar'};
 
 function fetchStatus() {
@@ -585,10 +683,8 @@ function fetchStatus() {
       document.getElementById('clock').textContent   = d.time;
       document.getElementById('ip-chip').textContent = d.ip;
 
-      safeSet('c_saat', d.c_saat);
-      safeSet('c_dol',  d.c_dol);
-      safeSet('c_uc',   d.c_uc);
-      safeSet('c_ana',  d.c_ana);
+      safeSet('c_saat', d.c_saat); safeSet('c_dol', d.c_dol);
+      safeSet('c_uc',   d.c_uc);   safeSet('c_ana', d.c_ana);
       safeSet('c_ara',  d.c_ara);
 
       if (document.activeElement !== document.getElementById('br_day')) {
@@ -600,27 +696,57 @@ function fetchStatus() {
         document.getElementById('br_night_val').textContent = d.br_night;
       }
 
-      if (!alarmEditing) {
-        safeSet('alarm_h', d.alarm_h);
-        safeSet('alarm_m', d.alarm_m);
-      }
+      if (!alarmEditing) { safeSet('alarm_h', d.alarm_h); safeSet('alarm_m', d.alarm_m); }
 
+      // Gece
       const nightOn = d.night === 'on';
       document.getElementById('dot-night').className  = 'dot '+(nightOn?'on':'off');
       document.getElementById('lbl-night').textContent = nightOn ? 'gece' : 'gündüz';
 
+      // NTP
       document.getElementById('dot-ntp').className  = 'dot '+(d.ntp_ok?'on':'off');
       document.getElementById('lbl-ntp').textContent = 'ntp '+d.last_ntp;
 
+      // Mod
       document.getElementById('lbl-mode').textContent = d.mode;
       document.getElementById('btn_mode0').classList.toggle('active', d.mode_num === 0);
 
+      // Gece butonları
       ['night_on','night_off','night_auto'].forEach(id =>
         document.getElementById('btn_'+id).classList.remove('active'));
       if (!d.auto_night)
         document.getElementById(nightOn?'btn_night_on':'btn_night_off').classList.add('active');
       else
         document.getElementById('btn_night_auto').classList.add('active');
+
+      // ---- LDR ----
+      const ldrPresent = d.ldr_present === true || d.ldr_present === 'true';
+      document.getElementById('dot-ldr').className  = 'dot '+(ldrPresent?'blue':'off');
+      document.getElementById('lbl-ldr').textContent = ldrPresent
+        ? 'ldr '+d.ldr_val
+        : 'ldr —';
+      document.getElementById('ldr-absent-msg').style.display    = ldrPresent ? 'none' : 'block';
+      document.getElementById('ldr-present-section').style.display = ldrPresent ? 'block' : 'none';
+
+      if (ldrPresent) {
+        const pct = Math.round(d.ldr_val / 40.95);
+        document.getElementById('ldr-bar').style.width = pct+'%';
+        document.getElementById('ldr-val-txt').textContent = d.ldr_val+' / 4095';
+        const state = d.ldr_val > d.ldr_night_thr ? 'karanlık → gece'
+                    : d.ldr_val < d.ldr_day_thr   ? 'aydınlık → gündüz'
+                    : 'geçiş bölgesi';
+        document.getElementById('ldr-state-txt').textContent = state;
+      }
+
+      // Eşik sliderları — sadece odakta değilse güncelle
+      if (document.activeElement !== document.getElementById('ldr_night_thr')) {
+        document.getElementById('ldr_night_thr').value = d.ldr_night_thr;
+        document.getElementById('ldr_night_val').textContent = d.ldr_night_thr;
+      }
+      if (document.activeElement !== document.getElementById('ldr_day_thr')) {
+        document.getElementById('ldr_day_thr').value = d.ldr_day_thr;
+        document.getElementById('ldr_day_val').textContent = d.ldr_day_thr;
+      }
 
       // Animasyon kartları
       const animStop = document.getElementById('btn_anim_stop');
@@ -641,20 +767,16 @@ function fetchStatus() {
       const stopBtn   = document.getElementById('btn_alarm_stop');
 
       if (firing) {
-        badgeWrap.style.display = '';
-        badge.textContent = '⚡ alarm!';
-        badge.className   = 'alarm-badge firing';
-        stopBtn.style.display = 'block';
+        badgeWrap.style.display = ''; badge.textContent = '⚡ alarm!';
+        badge.className = 'alarm-badge firing'; stopBtn.style.display = 'block';
         document.getElementById('dot-mode').className = 'dot red';
       } else if (enabled) {
         badgeWrap.style.display = '';
         badge.textContent = String(d.alarm_h).padStart(2,'0')+':'+String(d.alarm_m).padStart(2,'0');
-        badge.className   = 'alarm-badge on';
-        stopBtn.style.display = 'none';
+        badge.className = 'alarm-badge on'; stopBtn.style.display = 'none';
         document.getElementById('dot-mode').className = 'dot on';
       } else {
-        badgeWrap.style.display = 'none';
-        stopBtn.style.display   = 'none';
+        badgeWrap.style.display = 'none'; stopBtn.style.display = 'none';
         document.getElementById('dot-mode').className = 'dot on';
       }
     })
@@ -667,8 +789,11 @@ function api(url, successMsg, cb) {
     .catch(() => toast('baglanti hatasi'));
 }
 
-function setColor(key, val) { api('/api/color?key='+key+'&val='+encodeURIComponent(val)); }
-function setBrightness(type, val) { api('/api/brightness?type='+type+'&val='+val, 'parlaklik: '+val); }
+function setColor(key, val)      { api('/api/color?key='+key+'&val='+encodeURIComponent(val)); }
+function setBrightness(type, val){ api('/api/brightness?type='+type+'&val='+val, 'parlaklik: '+val); }
+function setLdrThreshold(type, val) {
+  api('/api/ldr/threshold?type='+type+'&val='+val, 'esik: '+val);
+}
 
 function setMode(m) {
   document.getElementById('btn_mode0').classList.add('active');
@@ -707,12 +832,10 @@ function ntpSync() {
 }
 
 function setAlarm(enable) {
-  alarmEditing = false;
-  clearTimeout(alarmBlurTimer);
+  alarmEditing = false; clearTimeout(alarmBlurTimer);
   document.getElementById('alarm-section').classList.remove('editing');
   const hint = document.getElementById('alarm-hint');
-  hint.textContent = 'saat ve dakika gir, aktif et\'e bas';
-  hint.classList.remove('active');
+  hint.textContent = 'saat ve dakika gir, aktif et\'e bas'; hint.classList.remove('active');
   const h = document.getElementById('alarm_h').value;
   const m = document.getElementById('alarm_m').value;
   if (enable && (h===''||m==='')) { toast('saat ve dakika girin'); return; }
@@ -739,6 +862,9 @@ setInterval(fetchStatus, 2000);
 </html>
 )rawhtml";
 
+// =====================================================================
+// API HANDLERS
+// =====================================================================
 
 void handleRoot() { server.send_P(200, "text/html", HTML_PAGE); }
 
@@ -750,54 +876,70 @@ void handleApiStatus() {
 
     String modeName;
     switch(currentMode) {
-        case 0: modeName = "normal";    break;
-        case 1: modeName = "saat basi"; break;
-        case 2: modeName = "alarm";     break;
-        case 3: modeName = "nefes";     break;
-        case 4: modeName = "meteor";    break;
-        case 5: modeName = "radar";     break;
-        default: modeName = "normal";
+        case 1: modeName="saat basi"; break;
+        case 2: modeName="alarm";     break;
+        case 3: modeName="nefes";     break;
+        case 4: modeName="meteor";    break;
+        case 5: modeName="radar";     break;
+        default: modeName="normal";
     }
 
     String json = "{";
-    json += "\"time\":\""        + String(timeBuf)                   + "\",";
-    json += "\"ip\":\""          + WiFi.localIP().toString()          + "\",";
-    json += "\"mode_num\":"      + String(currentMode)                + ",";
-    json += "\"mode\":\""        + modeName                           + "\",";
-    json += "\"night\":\""       + String(isNightMode?"on":"off")     + "\",";
-    json += "\"auto_night\":"    + String(autoNight?"true":"false")   + ",";
-    json += "\"ntp_ok\":"        + String(lastNtpSync?"true":"false") + ",";
-    json += "\"last_ntp\":\""    + (lastNtpSync ? String(sinceSync)+"dk" : String("-")) + "\",";
-    json += "\"c_saat\":\""      + rgbToHex(c_saat_r,c_saat_g,c_saat_b) + "\",";
-    json += "\"c_dol\":\""       + rgbToHex(c_dol_r, c_dol_g, c_dol_b)  + "\",";
-    json += "\"c_uc\":\""        + rgbToHex(c_uc_r,  c_uc_g,  c_uc_b)   + "\",";
-    json += "\"c_ana\":\""       + rgbToHex(c_ana_r, c_ana_g, c_ana_b)  + "\",";
-    json += "\"c_ara\":\""       + rgbToHex(c_ara_r, c_ara_g, c_ara_b)  + "\",";
-    json += "\"br_day\":"        + String(brightness_day)             + ",";
-    json += "\"br_night\":"      + String(brightness_night)           + ",";
-    json += "\"alarm_h\":"       + String(myAlarm.hour)               + ",";
-    json += "\"alarm_m\":"       + String(myAlarm.minute)             + ",";
-    json += "\"alarm_enabled\":" + String(myAlarm.enabled?"true":"false") + ",";
-    json += "\"alarm_firing\":"  + String(alarmFiring?"true":"false");
+    json += "\"time\":\""         + String(timeBuf)                   + "\",";
+    json += "\"ip\":\""           + WiFi.localIP().toString()          + "\",";
+    json += "\"mode_num\":"       + String(currentMode)                + ",";
+    json += "\"mode\":\""         + modeName                           + "\",";
+    json += "\"night\":\""        + String(isNightMode?"on":"off")     + "\",";
+    json += "\"auto_night\":"     + String(autoNight?"true":"false")   + ",";
+    json += "\"ntp_ok\":"         + String(lastNtpSync?"true":"false") + ",";
+    json += "\"last_ntp\":\""     + (lastNtpSync?String(sinceSync)+"dk":String("-")) + "\",";
+    json += "\"c_saat\":\""       + rgbToHex(c_saat_r,c_saat_g,c_saat_b) + "\",";
+    json += "\"c_dol\":\""        + rgbToHex(c_dol_r, c_dol_g, c_dol_b)  + "\",";
+    json += "\"c_uc\":\""         + rgbToHex(c_uc_r,  c_uc_g,  c_uc_b)   + "\",";
+    json += "\"c_ana\":\""        + rgbToHex(c_ana_r, c_ana_g, c_ana_b)  + "\",";
+    json += "\"c_ara\":\""        + rgbToHex(c_ara_r, c_ara_g, c_ara_b)  + "\",";
+    json += "\"br_day\":"         + String(brightness_day)             + ",";
+    json += "\"br_night\":"       + String(brightness_night)           + ",";
+    json += "\"alarm_h\":"        + String(myAlarm.hour)               + ",";
+    json += "\"alarm_m\":"        + String(myAlarm.minute)             + ",";
+    json += "\"alarm_enabled\":"  + String(myAlarm.enabled?"true":"false") + ",";
+    json += "\"alarm_firing\":"   + String(alarmFiring?"true":"false") + ",";
+    json += "\"ldr_present\":"    + String(ldrPresent?"true":"false")  + ",";
+    json += "\"ldr_val\":"        + String(ldrFiltered)                + ",";
+    json += "\"ldr_night_thr\":"  + String(ldrNightThreshold)          + ",";
+    json += "\"ldr_day_thr\":"    + String(ldrDayThreshold);
     json += "}";
     server.send(200, "application/json", json);
+}
+
+void handleApiLdrThreshold() {
+    if (!server.hasArg("type") || !server.hasArg("val")) { server.send(400); return; }
+    int val = server.arg("val").toInt();
+    if (server.arg("type") == "night") {
+        ldrNightThreshold = val;
+        // Gündüz eşiği gece eşiğinden büyük olamaz
+        if (ldrDayThreshold >= ldrNightThreshold)
+            ldrDayThreshold = ldrNightThreshold - 100;
+    } else {
+        ldrDayThreshold = val;
+        if (ldrDayThreshold >= ldrNightThreshold)
+            ldrNightThreshold = ldrDayThreshold + 100;
+    }
+    server.send(200);
 }
 
 void handleApiAnim() {
     if (!server.hasArg("type")) { server.send(400); return; }
     String type = server.arg("type");
-    if      (type == "hour")   { currentMode=1; animRunning=true; animStep=0; lastAnimUpdate=millis(); }
-    else if (type == "alarm")  { triggerAlarm(); }
-    else if (type == "breath") { startExtraAnim(3); }
-    else if (type == "meteor") { startExtraAnim(4); }
-    else if (type == "radar")  { startExtraAnim(5); }
+    if      (type=="hour")   { currentMode=1; animRunning=true; animStep=0; lastAnimUpdate=millis(); }
+    else if (type=="alarm")  { triggerAlarm(); }
+    else if (type=="breath") { startExtraAnim(3); }
+    else if (type=="meteor") { startExtraAnim(4); }
+    else if (type=="radar")  { startExtraAnim(5); }
     server.send(200);
 }
 
-void handleApiAnimStop() {
-    stopAlarmNow();
-    server.send(200);
-}
+void handleApiAnimStop()  { stopAlarmNow(); server.send(200); }
 
 void handleApiAlarm() {
     if (!server.hasArg("en")) { server.send(400); return; }
@@ -809,56 +951,50 @@ void handleApiAlarm() {
     server.send(200);
 }
 
-void handleApiAlarmStop() {
-    stopAlarmNow();
-    myAlarm.enabled = false;
-    server.send(200);
-}
+void handleApiAlarmStop() { stopAlarmNow(); myAlarm.enabled=false; server.send(200); }
 
 void handleApiColor() {
-    if (!server.hasArg("key") || !server.hasArg("val")) { server.send(400); return; }
-    uint8_t r, g, b; hexToRgb(server.arg("val"), r, g, b);
-    String key = server.arg("key");
-    if      (key=="saat") { c_saat_r=r; c_saat_g=g; c_saat_b=b; }
-    else if (key=="dol")  { c_dol_r=r;  c_dol_g=g;  c_dol_b=b;  }
-    else if (key=="uc")   { c_uc_r=r;   c_uc_g=g;   c_uc_b=b;   }
-    else if (key=="ana")  { c_ana_r=r;  c_ana_g=g;  c_ana_b=b;  }
-    else if (key=="ara")  { c_ara_r=r;  c_ara_g=g;  c_ara_b=b;  }
+    if (!server.hasArg("key")||!server.hasArg("val")) { server.send(400); return; }
+    uint8_t r,g,b; hexToRgb(server.arg("val"),r,g,b);
+    String key=server.arg("key");
+    if      (key=="saat"){c_saat_r=r;c_saat_g=g;c_saat_b=b;}
+    else if (key=="dol") {c_dol_r=r; c_dol_g=g; c_dol_b=b; }
+    else if (key=="uc")  {c_uc_r=r;  c_uc_g=g;  c_uc_b=b;  }
+    else if (key=="ana") {c_ana_r=r; c_ana_g=g; c_ana_b=b; }
+    else if (key=="ara") {c_ara_r=r; c_ara_g=g; c_ara_b=b; }
     server.send(200);
 }
 
 void handleApiBrightness() {
-    if (!server.hasArg("type") || !server.hasArg("val")) { server.send(400); return; }
-    uint8_t val = server.arg("val").toInt();
-    if (server.arg("type")=="day") { brightness_day=val;   if (!isNightMode) strip.setBrightness(val); }
-    else                           { brightness_night=val; if (isNightMode)  strip.setBrightness(val); }
+    if (!server.hasArg("type")||!server.hasArg("val")) { server.send(400); return; }
+    uint8_t val=server.arg("val").toInt();
+    if (server.arg("type")=="day") { brightness_day=val;   if(!isNightMode) strip.setBrightness(val); }
+    else                           { brightness_night=val; if(isNightMode)  strip.setBrightness(val); }
     server.send(200);
 }
 
 void handleApiMode() {
     if (!server.hasArg("val")) { server.send(400); return; }
-    int m = server.arg("val").toInt();
-    if (m == 0) stopAlarmNow();
-    else { currentMode=m; animRunning=true; animStep=0; lastAnimUpdate=millis(); }
+    if (server.arg("val").toInt()==0) stopAlarmNow();
     server.send(200);
 }
 
 void handleApiNight() {
     if (!server.hasArg("val")) { server.send(400); return; }
-    String val = server.arg("val");
+    String val=server.arg("val");
     if (val=="on")   { isNightMode=true;  autoNight=false; strip.setBrightness(brightness_night); }
     if (val=="off")  { isNightMode=false; autoNight=false; strip.setBrightness(brightness_day);   }
     if (val=="auto") { autoNight=true; checkDayNight(rtc.now().hour()); }
     server.send(200);
 }
 
-void handleApiNtp() { syncNTP(); server.send(200); }
+void handleApiNtp()     { syncNTP(); server.send(200); }
 
 void handleApiSetTime() {
-    if (!server.hasArg("h") || !server.hasArg("m")) { server.send(400); return; }
-    DateTime now = rtc.now();
-    rtc.adjust(DateTime(now.year(), now.month(), now.day(),
-                        server.arg("h").toInt(), server.arg("m").toInt(), 0));
+    if (!server.hasArg("h")||!server.hasArg("m")) { server.send(400); return; }
+    DateTime now=rtc.now();
+    rtc.adjust(DateTime(now.year(),now.month(),now.day(),
+               server.arg("h").toInt(),server.arg("m").toInt(),0));
     server.send(200);
 }
 
@@ -873,6 +1009,8 @@ void setup() {
     pinMode(BUTTON_HOUR_DOWN, INPUT_PULLUP);
     pinMode(BUTTON_MIN_UP,    INPUT_PULLUP);
     pinMode(BUTTON_MIN_DOWN,  INPUT_PULLUP);
+    // GPIO34 sadece giriş, pinMode gerekmez ama açıklık için:
+    pinMode(LDR_PIN, INPUT);
 
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid, password);
@@ -884,21 +1022,22 @@ void setup() {
     ArduinoOTA.onError([](ota_error_t e) { Serial.printf("OTA hata [%u]\n", e); });
     ArduinoOTA.begin();
 
-    server.on("/",               handleRoot);
-    server.on("/api/status",     handleApiStatus);
-    server.on("/api/anim",       handleApiAnim);
-    server.on("/api/anim/stop",  handleApiAnimStop);
-    server.on("/api/alarm",      handleApiAlarm);
-    server.on("/api/alarm/stop", handleApiAlarmStop);
-    server.on("/api/color",      handleApiColor);
-    server.on("/api/brightness", handleApiBrightness);
-    server.on("/api/mode",       handleApiMode);
-    server.on("/api/night",      handleApiNight);
-    server.on("/api/ntp",        handleApiNtp);
-    server.on("/api/settime",    handleApiSetTime);
+    server.on("/",                handleRoot);
+    server.on("/api/status",      handleApiStatus);
+    server.on("/api/ldr/threshold", handleApiLdrThreshold);
+    server.on("/api/anim",        handleApiAnim);
+    server.on("/api/anim/stop",   handleApiAnimStop);
+    server.on("/api/alarm",       handleApiAlarm);
+    server.on("/api/alarm/stop",  handleApiAlarmStop);
+    server.on("/api/color",       handleApiColor);
+    server.on("/api/brightness",  handleApiBrightness);
+    server.on("/api/mode",        handleApiMode);
+    server.on("/api/night",       handleApiNight);
+    server.on("/api/ntp",         handleApiNtp);
+    server.on("/api/settime",     handleApiSetTime);
     server.begin();
 
-    if (!rtc.begin()) { Serial.println("RTC yok!"); while (1); }
+    if (!rtc.begin()) { Serial.println("RTC yok!"); while(1); }
     if (rtc.lostPower()) Serial.println("RTC guc kaybetti.");
 
     strip.begin();
@@ -920,53 +1059,59 @@ void loop() {
 
     if (millis() - lastNtpSync >= NTP_INTERVAL) syncNTP();
 
+    // LDR oku ve filtrele
+    ldrUpdate();
+
+    // Gece/gündüz kontrolü
+    // LDR takılıysa sensör bazlı, takılı değilse saat bazlı
+    if (autoNight) {
+        if (ldrPresent) {
+            static unsigned long lastLdrNightCheck = 0;
+            if (millis() - lastLdrNightCheck >= 2000) {
+                lastLdrNightCheck = millis();
+                checkDayNightLDR();
+            }
+        } else {
+            static unsigned long lastNightCheck = 0;
+            if (millis() - lastNightCheck >= 60000) {
+                lastNightCheck = millis();
+                checkDayNight(now.hour());
+            }
+        }
+    }
+
     checkAlarm(now);
 
-    if (!alarmFiring && currentMode == 0 &&
-        now.minute() == 0 && now.second() == 0 && now.hour() != lastHour) {
-        lastHour       = now.hour();
-        currentMode    = 1;
-        animRunning    = true;
-        animStep       = 0;
-        lastAnimUpdate = millis();
+    // Saat başı animasyon tetikleme
+    if (!alarmFiring && currentMode==0 &&
+        now.minute()==0 && now.second()==0 && now.hour()!=lastHour) {
+        lastHour=now.hour(); currentMode=1;
+        animRunning=true; animStep=0; lastAnimUpdate=millis();
     }
-    if (now.hour() != lastHour && !(now.minute()==0 && now.second()==0))
-        lastHour = now.hour();
+    if (now.hour()!=lastHour && !(now.minute()==0&&now.second()==0))
+        lastHour=now.hour();
 
-    static unsigned long lastNightCheck = 0;
-    if (millis() - lastNightCheck >= 60000) {
-        lastNightCheck = millis();
-        checkDayNight(now.hour());
-    }
-
-    if (currentMode == 0 && !alarmFiring) {
-        static unsigned long lastButtonCheck = 0;
-        if (millis() - lastButtonCheck >= 50) {
-            lastButtonCheck = millis();
-            if (digitalRead(BUTTON_HOUR_UP)   == LOW) adjustTime(1,  0);
-            if (digitalRead(BUTTON_HOUR_DOWN) == LOW) adjustTime(-1, 0);
-            if (digitalRead(BUTTON_MIN_UP)    == LOW) adjustTime(0,  1);
-            if (digitalRead(BUTTON_MIN_DOWN)  == LOW) adjustTime(0, -1);
+    // Butonlar
+    if (currentMode==0 && !alarmFiring) {
+        static unsigned long lastButtonCheck=0;
+        if (millis()-lastButtonCheck>=50) {
+            lastButtonCheck=millis();
+            if (digitalRead(BUTTON_HOUR_UP)  ==LOW) adjustTime(1, 0);
+            if (digitalRead(BUTTON_HOUR_DOWN)==LOW) adjustTime(-1,0);
+            if (digitalRead(BUTTON_MIN_UP)   ==LOW) adjustTime(0, 1);
+            if (digitalRead(BUTTON_MIN_DOWN) ==LOW) adjustTime(0,-1);
         }
     }
 
     // Öncelik sırası
-    if (alarmFiring || currentMode == 2) {
-        runAlarmAnimation();
-    } else if (currentMode == 1 && animRunning) {
-        runHourAnimation();
-    } else if (currentMode == 3) {
-        runBreathAnimation();
-    } else if (currentMode == 4) {
-        runMeteorAnimation();
-    } else if (currentMode == 5) {
-        runRadarAnimation();
-    } else {
-        currentMode = 0;
-        static unsigned long lastUpdate = 0;
-        if (millis() - lastUpdate >= 20) {
-            lastUpdate = millis();
-            updateClockDisplay(now);
-        }
+    if      (alarmFiring || currentMode==2) runAlarmAnimation();
+    else if (currentMode==1 && animRunning)  runHourAnimation();
+    else if (currentMode==3)                 runBreathAnimation();
+    else if (currentMode==4)                 runMeteorAnimation();
+    else if (currentMode==5)                 runRadarAnimation();
+    else {
+        currentMode=0;
+        static unsigned long lastUpdate=0;
+        if (millis()-lastUpdate>=20) { lastUpdate=millis(); updateClockDisplay(now); }
     }
 }
