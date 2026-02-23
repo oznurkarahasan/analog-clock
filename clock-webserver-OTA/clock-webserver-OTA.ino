@@ -41,6 +41,9 @@ uint8_t c_ana_r=200, c_ana_g=200,  c_ana_b=200;
 uint8_t c_ara_r=30,  c_ara_g=30,   c_ara_b=30;
 uint8_t brightness_day=80, brightness_night=40;
 
+// Per-color brightness (0-255)
+uint8_t bright_saat=255, bright_dol=128, bright_uc=255, bright_ana=255, bright_ara=128;
+
 int  currentMode  = 0;
 int  lastHour     = -1;
 bool animRunning  = false;
@@ -64,6 +67,11 @@ unsigned long lastExtraAnimUpdate = 0;
 int  meteorPos    = 0;
 int  radarPos     = 0;
 uint8_t radarTrail[60] = {0};
+
+// Per-color brightness helper
+inline uint8_t applyBright(uint8_t val, uint8_t bright) {
+    return (uint8_t)((uint16_t)val * bright / 255);
+}
 
 void adjustTime(int hourChange, int minChange) {
     DateTime now = rtc.now();
@@ -94,23 +102,37 @@ void updateClockDisplay(DateTime t) {
     int hrPos = hr * 5;
 
     for (int i = 0; i <= mn; i++)
-        strip.setPixelColor(i, strip.Color(c_dol_r, c_dol_g, c_dol_b));
+        strip.setPixelColor(i, strip.Color(
+            applyBright(c_dol_r, bright_dol),
+            applyBright(c_dol_g, bright_dol),
+            applyBright(c_dol_b, bright_dol)));
 
     for (int i = 0; i < 60; i += 5) {
         if (i == 0 || i == 15 || i == 30 || i == 45)
-            strip.setPixelColor(i, strip.Color(c_ana_r, c_ana_g, c_ana_b));
+            strip.setPixelColor(i, strip.Color(
+                applyBright(c_ana_r, bright_ana),
+                applyBright(c_ana_g, bright_ana),
+                applyBright(c_ana_b, bright_ana)));
         else
-            strip.setPixelColor(i, strip.Color(c_ara_r, c_ara_g, c_ara_b));
+            strip.setPixelColor(i, strip.Color(
+                applyBright(c_ara_r, bright_ara),
+                applyBright(c_ara_g, bright_ara),
+                applyBright(c_ara_b, bright_ara)));
     }
 
-    uint8_t boost = 1.3f;
-    auto boosted = [](uint8_t v) -> uint8_t {
-    return (uint8_t)min(255, (int)(v * 1.3f));
+    auto boosted = [](uint8_t v, uint8_t br) -> uint8_t {
+        return (uint8_t)min(255, (int)(applyBright(v, br) * 1.3f));
     };
-    strip.setPixelColor(mn, strip.Color(boosted(c_uc_r), boosted(c_uc_g), boosted(c_uc_b)));
+    strip.setPixelColor(mn, strip.Color(
+        boosted(c_uc_r, bright_uc),
+        boosted(c_uc_g, bright_uc),
+        boosted(c_uc_b, bright_uc)));
 
     if (millis() % 2000 < 1900)
-        strip.setPixelColor(hrPos, strip.Color(c_saat_r, c_saat_g, c_saat_b));
+        strip.setPixelColor(hrPos, strip.Color(
+            applyBright(c_saat_r, bright_saat),
+            applyBright(c_saat_g, bright_saat),
+            applyBright(c_saat_b, bright_saat)));
     else
         strip.setPixelColor(hrPos, strip.Color(0, 0, 0));
 
@@ -355,7 +377,11 @@ body{background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;min-
 .field{display:flex;align-items:center;justify-content:space-between;
        padding:0.6rem 0;border-bottom:1px solid var(--border)}
 .field:last-child{border-bottom:none}
+.field-sub{display:flex;align-items:center;justify-content:space-between;
+           padding:0.4rem 0 0.6rem 0.8rem;border-bottom:1px solid var(--border)}
+.field-sub:last-child{border-bottom:none}
 .field-label{font-size:0.65rem;color:var(--muted);letter-spacing:0.04em}
+.field-label-sub{font-size:0.58rem;color:var(--muted);opacity:0.6;letter-spacing:0.04em}
 input[type="color"]{width:2.2rem;height:1.8rem;border:1px solid var(--border);
                     background:none;cursor:pointer;padding:2px;border-radius:2px}
 input[type="range"]{width:110px;accent-color:var(--accent)}
@@ -429,11 +455,67 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
 
 <!-- TAB: RENKLER -->
 <div class="tab-content active" id="tab-renkler">
-  <div class="field"><span class="field-label">saat göstergesi</span><input type="color" id="c_saat" onchange="setColor('saat',this.value)"></div>
-  <div class="field"><span class="field-label">dakika dolgu</span><input type="color" id="c_dol" onchange="setColor('dol',this.value)"></div>
-  <div class="field"><span class="field-label">dakika ucu (nefes)</span><input type="color" id="c_uc" onchange="setColor('uc',this.value)"></div>
-  <div class="field"><span class="field-label">ana işaret 12/3/6/9</span><input type="color" id="c_ana" onchange="setColor('ana',this.value)"></div>
-  <div class="field"><span class="field-label">ara işaret</span><input type="color" id="c_ara" onchange="setColor('ara',this.value)"></div>
+
+  <div class="field">
+    <span class="field-label">saat göstergesi</span>
+    <input type="color" id="c_saat" onchange="setColor('saat',this.value)">
+  </div>
+  <div class="field-sub">
+    <span class="field-label-sub">↳ parlaklık</span>
+    <input type="range" id="br_saat" min="0" max="255"
+           oninput="document.getElementById('br_saat_val').textContent=this.value"
+           onchange="setColorBright('saat',this.value)">
+    <span class="range-val" id="br_saat_val">—</span>
+  </div>
+
+  <div class="field">
+    <span class="field-label">dakika dolgu</span>
+    <input type="color" id="c_dol" onchange="setColor('dol',this.value)">
+  </div>
+  <div class="field-sub">
+    <span class="field-label-sub">↳ parlaklık</span>
+    <input type="range" id="br_dol" min="0" max="255"
+           oninput="document.getElementById('br_dol_val').textContent=this.value"
+           onchange="setColorBright('dol',this.value)">
+    <span class="range-val" id="br_dol_val">—</span>
+  </div>
+
+  <div class="field">
+    <span class="field-label">dakika ucu (nefes)</span>
+    <input type="color" id="c_uc" onchange="setColor('uc',this.value)">
+  </div>
+  <div class="field-sub">
+    <span class="field-label-sub">↳ parlaklık</span>
+    <input type="range" id="br_uc" min="0" max="255"
+           oninput="document.getElementById('br_uc_val').textContent=this.value"
+           onchange="setColorBright('uc',this.value)">
+    <span class="range-val" id="br_uc_val">—</span>
+  </div>
+
+  <div class="field">
+    <span class="field-label">ana işaret 12/3/6/9</span>
+    <input type="color" id="c_ana" onchange="setColor('ana',this.value)">
+  </div>
+  <div class="field-sub">
+    <span class="field-label-sub">↳ parlaklık</span>
+    <input type="range" id="br_ana" min="0" max="255"
+           oninput="document.getElementById('br_ana_val').textContent=this.value"
+           onchange="setColorBright('ana',this.value)">
+    <span class="range-val" id="br_ana_val">—</span>
+  </div>
+
+  <div class="field">
+    <span class="field-label">ara işaret</span>
+    <input type="color" id="c_ara" onchange="setColor('ara',this.value)">
+  </div>
+  <div class="field-sub">
+    <span class="field-label-sub">↳ parlaklık</span>
+    <input type="range" id="br_ara" min="0" max="255"
+           oninput="document.getElementById('br_ara_val').textContent=this.value"
+           onchange="setColorBright('ara',this.value)">
+    <span class="range-val" id="br_ara_val">—</span>
+  </div>
+
 </div>
 
 <!-- TAB: PARLAKLIK -->
@@ -557,6 +639,14 @@ function safeSet(id, val) {
   if (el && document.activeElement !== el) el.value = val;
 }
 
+function safeSetRange(id, valId, val) {
+  const el = document.getElementById(id);
+  if (el && document.activeElement !== el) {
+    el.value = val;
+    document.getElementById(valId).textContent = val;
+  }
+}
+
 function onAlarmFocus() {
   clearTimeout(alarmBlurTimer);
   alarmEditing = true;
@@ -576,7 +666,6 @@ function onAlarmBlur() {
   }, 200);
 }
 
-// mod_num → animasyon kartı eşleşmesi
 const MODE_TO_ANIM = {1:'hour', 2:'alarm', 3:'breath', 4:'meteor', 5:'radar'};
 
 function fetchStatus() {
@@ -591,6 +680,12 @@ function fetchStatus() {
       safeSet('c_uc',   d.c_uc);
       safeSet('c_ana',  d.c_ana);
       safeSet('c_ara',  d.c_ara);
+
+      safeSetRange('br_saat', 'br_saat_val', d.bright_saat);
+      safeSetRange('br_dol',  'br_dol_val',  d.bright_dol);
+      safeSetRange('br_uc',   'br_uc_val',   d.bright_uc);
+      safeSetRange('br_ana',  'br_ana_val',  d.bright_ana);
+      safeSetRange('br_ara',  'br_ara_val',  d.bright_ara);
 
       if (document.activeElement !== document.getElementById('br_day')) {
         document.getElementById('br_day').value = d.br_day;
@@ -623,7 +718,6 @@ function fetchStatus() {
       else
         document.getElementById('btn_night_auto').classList.add('active');
 
-      // Animasyon kartları
       const animStop = document.getElementById('btn_anim_stop');
       ANIM_TYPES.forEach(t => document.getElementById('anim_'+t).classList.remove('running'));
       const runningAnim = MODE_TO_ANIM[d.mode_num];
@@ -634,7 +728,6 @@ function fetchStatus() {
         animStop.style.display = 'none';
       }
 
-      // Alarm badge
       const firing  = d.alarm_firing  === true || d.alarm_firing  === 'true';
       const enabled = d.alarm_enabled === true || d.alarm_enabled === 'true';
       const badge     = document.getElementById('alarm-badge');
@@ -670,6 +763,7 @@ function api(url, successMsg, cb) {
 
 function setColor(key, val) { api('/api/color?key='+key+'&val='+encodeURIComponent(val)); }
 function setBrightness(type, val) { api('/api/brightness?type='+type+'&val='+val, 'parlaklik: '+val); }
+function setColorBright(key, val) { api('/api/colorbright?key='+key+'&val='+val, key+' parlaklik: '+val); }
 
 function setMode(m) {
   document.getElementById('btn_mode0').classList.add('active');
@@ -776,6 +870,11 @@ void handleApiStatus() {
     json += "\"c_ara\":\""       + rgbToHex(c_ara_r, c_ara_g, c_ara_b)  + "\",";
     json += "\"br_day\":"        + String(brightness_day)             + ",";
     json += "\"br_night\":"      + String(brightness_night)           + ",";
+    json += "\"bright_saat\":"   + String(bright_saat)                + ",";
+    json += "\"bright_dol\":"    + String(bright_dol)                 + ",";
+    json += "\"bright_uc\":"     + String(bright_uc)                  + ",";
+    json += "\"bright_ana\":"    + String(bright_ana)                 + ",";
+    json += "\"bright_ara\":"    + String(bright_ara)                 + ",";
     json += "\"alarm_h\":"       + String(myAlarm.hour)               + ",";
     json += "\"alarm_m\":"       + String(myAlarm.minute)             + ",";
     json += "\"alarm_enabled\":" + String(myAlarm.enabled?"true":"false") + ",";
@@ -825,6 +924,18 @@ void handleApiColor() {
     else if (key=="uc")   { c_uc_r=r;   c_uc_g=g;   c_uc_b=b;   }
     else if (key=="ana")  { c_ana_r=r;  c_ana_g=g;  c_ana_b=b;  }
     else if (key=="ara")  { c_ara_r=r;  c_ara_g=g;  c_ara_b=b;  }
+    server.send(200);
+}
+
+void handleApiColorBright() {
+    if (!server.hasArg("key") || !server.hasArg("val")) { server.send(400); return; }
+    uint8_t val = (uint8_t)server.arg("val").toInt();
+    String key = server.arg("key");
+    if      (key=="saat") bright_saat = val;
+    else if (key=="dol")  bright_dol  = val;
+    else if (key=="uc")   bright_uc   = val;
+    else if (key=="ana")  bright_ana  = val;
+    else if (key=="ara")  bright_ara  = val;
     server.send(200);
 }
 
@@ -892,6 +1003,7 @@ void setup() {
     server.on("/api/alarm",      handleApiAlarm);
     server.on("/api/alarm/stop", handleApiAlarmStop);
     server.on("/api/color",      handleApiColor);
+    server.on("/api/colorbright",handleApiColorBright);
     server.on("/api/brightness", handleApiBrightness);
     server.on("/api/mode",       handleApiMode);
     server.on("/api/night",      handleApiNight);
@@ -951,7 +1063,6 @@ void loop() {
         }
     }
 
-    // Öncelik sırası
     if (alarmFiring || currentMode == 2) {
         runAlarmAnimation();
     } else if (currentMode == 1 && animRunning) {
