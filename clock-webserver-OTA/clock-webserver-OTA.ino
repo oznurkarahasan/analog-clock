@@ -21,8 +21,8 @@ const char* password = "password";
 
 #define NIGHT_START_HOUR  20
 #define DAY_START_HOUR    8
-#define BRIGHTNESS_DAY    20
-#define BRIGHTNESS_NIGHT  30
+#define BRIGHTNESS_DAY    80
+#define BRIGHTNESS_NIGHT  40
 
 #define NTP_SERVER    "pool.ntp.org"
 #define UTC_OFFSET    10800
@@ -39,7 +39,7 @@ uint8_t c_dol_r=50,  c_dol_g=15,   c_dol_b=0;
 uint8_t c_uc_r=255,  c_uc_g=40,    c_uc_b=0;
 uint8_t c_ana_r=200, c_ana_g=200,  c_ana_b=200;
 uint8_t c_ara_r=30,  c_ara_g=30,   c_ara_b=30;
-uint8_t brightness_day=20, brightness_night=30;
+uint8_t brightness_day=80, brightness_night=40;
 
 int  currentMode  = 0;
 int  lastHour     = -1;
@@ -91,7 +91,7 @@ void updateClockDisplay(DateTime t) {
     int hr    = t.hour() % 12;
     int mn    = t.minute();
     int sc    = t.second();
-    int hrPos = (hr * 5) + (mn / 12);
+    int hrPos = hr * 5;
 
     for (int i = 0; i <= mn; i++)
         strip.setPixelColor(i, strip.Color(c_dol_r, c_dol_g, c_dol_b));
@@ -103,10 +103,11 @@ void updateClockDisplay(DateTime t) {
             strip.setPixelColor(i, strip.Color(c_ara_r, c_ara_g, c_ara_b));
     }
 
-    uint8_t br = breathCalc();
-    float ratio_g = c_uc_g / (float)(c_uc_r + 1);
-    float ratio_b = c_uc_b / (float)(c_uc_r + 1);
-    strip.setPixelColor(mn, strip.Color(br, (uint8_t)(br * ratio_g), (uint8_t)(br * ratio_b)));
+    uint8_t boost = 1.3f;
+    auto boosted = [](uint8_t v) -> uint8_t {
+    return (uint8_t)min(255, (int)(v * 1.3f));
+    };
+    strip.setPixelColor(mn, strip.Color(boosted(c_uc_r), boosted(c_uc_g), boosted(c_uc_b)));
 
     if (millis() % 2000 < 1900)
         strip.setPixelColor(hrPos, strip.Color(c_saat_r, c_saat_g, c_saat_b));
