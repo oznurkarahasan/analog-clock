@@ -8,11 +8,11 @@
 #include <WebServer.h>
 #include <time.h>
 
-const char* ssid     = "wifi";
+const char* ssid = "wifi";
 const char* password = "password";
 
 #define LED_PIN     4
-#define NUM_LEDS    60
+#define NUM_LEDS    61
 
 #define BUTTON_HOUR_UP   25
 #define BUTTON_HOUR_DOWN 26
@@ -31,18 +31,21 @@ const char* password = "password";
 #define ALARM_DURATION 15000UL
 
 RTC_DS3231 rtc;
-Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_RGB + NEO_KHZ800);
 WebServer server(80);
 
-uint8_t c_saat_r=0,  c_saat_g=255, c_saat_b=0;
-uint8_t c_dol_r=50,  c_dol_g=15,   c_dol_b=0;
-uint8_t c_uc_r=255,  c_uc_g=40,    c_uc_b=0;
-uint8_t c_ana_r=200, c_ana_g=200,  c_ana_b=200;
-uint8_t c_ara_r=30,  c_ara_g=30,   c_ara_b=30;
+// Varsayılan renkler — STM32 kodundaki değerlerle eşleştirildi
+uint8_t c_saat_r=0, c_saat_g=200, c_saat_b=0;   // Saat ibresi: sarı (breathing ile yeşil geçiş)
+// uint8_t c_dol_r=80,   c_dol_g=0,    c_dol_b=80;    // Dakika dolgu: loş mor
+// uint8_t c_uc_r=60,    c_uc_g=0,     c_uc_b=60;     // Dakika ucu: mor
+uint8_t c_dol_r=80,   c_dol_g=30,   c_dol_b=0;     // Dakika dolgu: loş turuncu
+uint8_t c_uc_r=255,   c_uc_g=80,    c_uc_b=0;      // Dakika ucu: turuncu
+uint8_t c_ana_r=60,   c_ana_g=60,   c_ana_b=60;    // Ana işaret (12/3/6/9): parlak beyaz
+uint8_t c_ara_r=5,    c_ara_g=5,    c_ara_b=5;     // Ara işaret: loş beyaz
 uint8_t brightness_day=80, brightness_night=40;
 
 // Per-color brightness (0-255)
-uint8_t bright_saat=255, bright_dol=128, bright_uc=255, bright_ana=255, bright_ara=128;
+uint8_t bright_saat=255, bright_dol=18, bright_uc=255, bright_ana=255, bright_ara=255;
 
 int  currentMode  = 0;
 int  lastHour     = -1;
@@ -68,6 +71,11 @@ int  meteorPos    = 0;
 int  radarPos     = 0;
 uint8_t radarTrail[60] = {0};
 
+// STM32 kodundan taşınan değişkenler
+int  lastSecond  = -1;               // Saniye değişimini tespit etmek için
+unsigned long secAnimStart = 0;      // Saniye animasyonu başlangıç zamanı
+bool secAnimActive = false;          // Saniye animasyonu aktif mi
+
 // Per-color brightness helper
 inline uint8_t applyBright(uint8_t val, uint8_t bright) {
     return (uint8_t)((uint16_t)val * bright / 255);
@@ -88,6 +96,19 @@ uint32_t Wheel(byte WheelPos) {
     return strip.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
 }
 
+// STM32 kodundaki Wheel fonksiyonu (saniye animasyonu için orijinal versiyon)
+uint32_t WheelOriginal(byte WheelPos) {
+    if (WheelPos < 85) {
+        return strip.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
+    } else if (WheelPos < 170) {
+        WheelPos -= 85;
+        return strip.Color(255 - WheelPos * 3, 0, WheelPos * 3);
+    } else {
+        WheelPos -= 170;
+        return strip.Color(0, WheelPos * 3, 255 - WheelPos * 3);
+    }
+}
+
 uint8_t breathCalc() {
     float t = (millis() % 3000) / 3000.0f;
     float b = 0.3f + 0.7f * (1.0f - cos(t * 2.0f * PI)) / 2.0f;
@@ -99,44 +120,79 @@ void updateClockDisplay(DateTime t) {
     int hr    = t.hour() % 12;
     int mn    = t.minute();
     int sc    = t.second();
-    int hrPos = hr * 5;
+    int hrPos = hr * 5;  // Saat LED konumu (0, 5, 10, ..., 55)
 
-    for (int i = 0; i <= mn; i++)
+    // --- Saniye değişimini tespit et, animasyonu başlat ---
+    if (sc != lastSecond) {
+        lastSecond = sc;
+        secAnimStart = millis();
+        secAnimActive = true;
+    }
+
+    // --- Saniye animasyonu: j=255→0 arası Wheel geçişi (~765ms) ---
+    // STM32'de: for(j=255; j>0; j--) { ... delay(3); }
+    // Burada millis tabanlı: 765ms boyunca j=255'ten 0'a
+    uint8_t secJ = 0;
+    if (secAnimActive) {
+        unsigned long elapsed = millis() - secAnimStart;
+        if (elapsed < 765) {
+            secJ = 255 - (uint8_t)(elapsed * 255UL / 765);
+        } else {
+            secAnimActive = false;
+            secJ = 0;
+        }
+    }
+
+    // 1) Tüm LED'leri temizle (zaten strip.clear() yapıldı, LED 0 dahil)
+
+    // 2) Dakika dolgu LED'leri (1'den dakikaya kadar, çok loş mor)
+    for (int i = 1; i <= mn; i++) {
         strip.setPixelColor(i, strip.Color(
             applyBright(c_dol_r, bright_dol),
             applyBright(c_dol_g, bright_dol),
             applyBright(c_dol_b, bright_dol)));
-
-    for (int i = 0; i < 60; i += 5) {
-        if (i == 0 || i == 15 || i == 30 || i == 45)
-            strip.setPixelColor(i, strip.Color(
-                applyBright(c_ana_r, bright_ana),
-                applyBright(c_ana_g, bright_ana),
-                applyBright(c_ana_b, bright_ana)));
-        else
-            strip.setPixelColor(i, strip.Color(
-                applyBright(c_ara_r, bright_ara),
-                applyBright(c_ara_g, bright_ara),
-                applyBright(c_ara_b, bright_ara)));
     }
 
-    auto boosted = [](uint8_t v, uint8_t br) -> uint8_t {
-        return (uint8_t)min(255, (int)(applyBright(v, br) * 1.3f));
-    };
-    strip.setPixelColor(mn, strip.Color(
-        boosted(c_uc_r, bright_uc),
-        boosted(c_uc_g, bright_uc),
-        boosted(c_uc_b, bright_uc)));
+    // 3) İşaret LED'leri
+    // Ana işaretler: 0, 15, 30, 45 → parlak beyaz
+    strip.setPixelColor(0,  strip.Color(applyBright(c_ana_r, bright_ana), applyBright(c_ana_g, bright_ana), applyBright(c_ana_b, bright_ana)));
+    strip.setPixelColor(15, strip.Color(applyBright(c_ana_r, bright_ana), applyBright(c_ana_g, bright_ana), applyBright(c_ana_b, bright_ana)));
+    strip.setPixelColor(30, strip.Color(applyBright(c_ana_r, bright_ana), applyBright(c_ana_g, bright_ana), applyBright(c_ana_b, bright_ana)));
+    strip.setPixelColor(45, strip.Color(applyBright(c_ana_r, bright_ana), applyBright(c_ana_g, bright_ana), applyBright(c_ana_b, bright_ana)));
+    // Ara işaretler: 5, 10, 20, 25, 35, 40, 50, 55 → loş beyaz
+    strip.setPixelColor(5,  strip.Color(applyBright(c_ara_r, bright_ara), applyBright(c_ara_g, bright_ara), applyBright(c_ara_b, bright_ara)));
+    strip.setPixelColor(10, strip.Color(applyBright(c_ara_r, bright_ara), applyBright(c_ara_g, bright_ara), applyBright(c_ara_b, bright_ara)));
+    strip.setPixelColor(20, strip.Color(applyBright(c_ara_r, bright_ara), applyBright(c_ara_g, bright_ara), applyBright(c_ara_b, bright_ara)));
+    strip.setPixelColor(25, strip.Color(applyBright(c_ara_r, bright_ara), applyBright(c_ara_g, bright_ara), applyBright(c_ara_b, bright_ara)));
+    strip.setPixelColor(35, strip.Color(applyBright(c_ara_r, bright_ara), applyBright(c_ara_g, bright_ara), applyBright(c_ara_b, bright_ara)));
+    strip.setPixelColor(40, strip.Color(applyBright(c_ara_r, bright_ara), applyBright(c_ara_g, bright_ara), applyBright(c_ara_b, bright_ara)));
+    strip.setPixelColor(50, strip.Color(applyBright(c_ara_r, bright_ara), applyBright(c_ara_g, bright_ara), applyBright(c_ara_b, bright_ara)));
+    strip.setPixelColor(55, strip.Color(applyBright(c_ara_r, bright_ara), applyBright(c_ara_g, bright_ara), applyBright(c_ara_b, bright_ara)));
 
-    if (millis() % 2000 < 1900)
+    // 4) Dakika ucu LED'i (dakika ibresinin uç noktası)
+    strip.setPixelColor(mn, strip.Color(
+        applyBright(c_uc_r, bright_uc),
+        applyBright(c_uc_g, bright_uc),
+        applyBright(c_uc_b, bright_uc)));
+
+    // 5) Saat ibresi — sabit yeşil, blink (1000ms döngü: 700ms açık, 300ms kapalı)
+    if (millis() % 1000 < 700) {
         strip.setPixelColor(hrPos, strip.Color(
             applyBright(c_saat_r, bright_saat),
             applyBright(c_saat_g, bright_saat),
             applyBright(c_saat_b, bright_saat)));
-    else
+    } else {
         strip.setPixelColor(hrPos, strip.Color(0, 0, 0));
+    }
 
-    strip.setPixelColor(sc, Wheel((millis() / 15) & 255));
+    // 6) Saniye LED'i — STM32'deki Wheel gökkuşağı geçişi
+    if (secAnimActive) {
+        strip.setPixelColor(sc, WheelOriginal(secJ & 255));
+    } else {
+        // Animasyon bittiyse saniye LED'ini loş bırak
+        strip.setPixelColor(sc, WheelOriginal(0));
+    }
+
     strip.show();
 }
 
@@ -481,7 +537,7 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
   </div>
 
   <div class="field">
-    <span class="field-label">dakika ucu (nefes)</span>
+    <span class="field-label">dakika ucu</span>
     <input type="color" id="c_uc" onchange="setColor('uc',this.value)">
   </div>
   <div class="field-sub">
