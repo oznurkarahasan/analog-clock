@@ -8,8 +8,8 @@
 #include <WebServer.h>
 #include <time.h>
 
-const char* ssid = "wifi";
-const char* password = "password";
+const char* ssid = "p";
+const char* password = "p";
 
 #define LED_PIN     4
 #define NUM_LEDS    61
@@ -371,11 +371,21 @@ void triggerAlarm() {
     lastAlarmUpdate = millis();
     currentMode     = 2;
 }
+int lastAlarmMinute = -1;
 
 void checkAlarm(DateTime now) {
     if (!myAlarm.enabled || alarmFiring) return;
-    if (now.hour()==myAlarm.hour && now.minute()==myAlarm.minute && now.second()==0)
+    
+    bool shouldFire = (now.hour() == myAlarm.hour && now.minute() == myAlarm.minute);
+    
+    if (shouldFire && lastAlarmMinute != now.minute()) {
+        lastAlarmMinute = now.minute();
         triggerAlarm();
+    }
+    
+    if (!shouldFire) {
+        lastAlarmMinute = -1;
+    }
 }
 
 void startExtraAnim(int mode) {
@@ -1050,6 +1060,7 @@ void setup() {
     ArduinoOTA.setHostname("analog-clock-ESP32");
     ArduinoOTA.onEnd([]()                { Serial.println("OTA tamam."); });
     ArduinoOTA.onError([](ota_error_t e) { Serial.printf("OTA hata [%u]\n", e); });
+    ArduinoOTA.setPassword("gaca"); 
     ArduinoOTA.begin();
 
     server.on("/",               handleRoot);
