@@ -449,10 +449,11 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{font-size:20px}
 :root{
-  --bg:#0a0a0a;--surface:#141414;--surface2:#1c1c1c;
-  --border:#252525;--text:#e0e0e0;--muted:#555;--accent:#fff;
-  --green:#00e676;--red:#ff5252;--amber:#ffab40;
+  --bg:#fdf5e0;--surface:#f0e8d0;--surface2:#e5dbc4;
+  --border:#c8ba9a;--text:#281e10;--muted:#7a6a54;--accent:#281e10;
+  --green:#1a8a6e;--red:#c0392b;--amber:#9a7200;
 }
 body{background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;min-height:100vh}
 .header{padding:1.5rem 1.5rem 0;display:flex;justify-content:space-between;align-items:flex-start}
@@ -757,6 +758,17 @@ let alarmBlurTimer = null;
 let toastTimer;
 let alarmDays = 0;
 
+let _clockBase = null, _clockBaseAt = 0;
+function tickClock() {
+  if (!_clockBase) return;
+  const el = document.getElementById('clock'); if (!el) return;
+  const s0 = _clockBase.s + Math.round((Date.now() - _clockBaseAt) / 1000);
+  let s = s0 % 60, carry = Math.floor(s0 / 60);
+  let m = (_clockBase.m + carry) % 60; carry = Math.floor((_clockBase.m + carry) / 60);
+  let h = (_clockBase.h + carry) % 24;
+  el.textContent = String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+}
+
 function toggleDay(d) { alarmDays ^= (1 << d); updateDayUI(); }
 function setDays(mask) { alarmDays = mask; updateDayUI(); }
 function updateDayUI() {
@@ -826,8 +838,11 @@ function fetchStatus() {
   fetch('/api/status', {signal: AbortSignal.timeout(2000)})
     .then(r => r.json())
     .then(d => {
-      document.getElementById('clock').textContent   = d.time;
       document.getElementById('ip-chip').textContent = d.ip;
+      const _tp = d.time.split(':');
+      _clockBase = {h:parseInt(_tp[0]),m:parseInt(_tp[1]),s:parseInt(_tp[2])};
+      _clockBaseAt = Date.now();
+      tickClock();
 
       safeSet('c_saat', d.c_saat);
       safeSet('c_dol',  d.c_dol);
@@ -991,6 +1006,7 @@ function setTime() {
 
 fetchStatus();
 setInterval(fetchStatus, 2000);
+setInterval(tickClock, 1000);
 </script>
 </body>
 </html>
