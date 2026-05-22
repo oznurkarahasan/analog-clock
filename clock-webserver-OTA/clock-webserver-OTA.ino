@@ -1,4 +1,4 @@
-#include <WiFi.h>
+  #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
@@ -57,9 +57,10 @@ bool autoNight    = true;
 unsigned long lastNtpSync = 0;
 
 struct AlarmClock {
-    int  hour    = 7;
-    int  minute  = 0;
-    bool enabled = false;
+    int     hour    = 7;
+    int     minute  = 0;
+    bool    enabled = false;
+    uint8_t days    = 0;  // bitmask: bit0=Paz,bit1=Pzt,...,bit6=Cmt — 0=tek sefer
 };
 AlarmClock myAlarm;
 bool  alarmFiring     = false;
@@ -406,14 +407,21 @@ int lastAlarmMinute = -1;
 
 void checkAlarm(DateTime now) {
     if (!myAlarm.enabled || alarmFiring) return;
-    
+
     bool shouldFire = (now.hour() == myAlarm.hour && now.minute() == myAlarm.minute);
-    
+
     if (shouldFire && lastAlarmMinute != now.minute()) {
-        lastAlarmMinute = now.minute();
-        triggerAlarm();
+        bool dayOk = true;
+        if (myAlarm.days != 0) {
+            dayOk = (myAlarm.days & (1 << now.dayOfTheWeek())) != 0;
+        }
+        if (dayOk) {
+            lastAlarmMinute = now.minute();
+            triggerAlarm();
+            if (myAlarm.days == 0) myAlarm.enabled = false;  // tek sefer → kapat
+        }
     }
-    
+
     if (!shouldFire) {
         lastAlarmMinute = -1;
     }
@@ -517,6 +525,17 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
 .anim-card.running{border-color:var(--green);background:var(--surface2)}
 .anim-card-title{font-size:0.65rem;color:var(--text);letter-spacing:0.05em;display:block;margin-bottom:0.2rem}
 .anim-card-sub{font-size:0.58rem;color:var(--muted)}
+.day-row{display:flex;gap:1px;margin-bottom:0.5rem}
+.day-btn{flex:1;background:var(--surface);border:1px solid var(--border);color:var(--muted);
+         padding:0.5rem 0;font-family:'DM Mono',monospace;font-size:0.58rem;cursor:pointer;
+         text-align:center;transition:all 0.12s;user-select:none}
+.day-btn.active{border-color:var(--accent);color:var(--accent);background:var(--surface2)}
+.day-shortcuts{display:flex;gap:1px;margin-bottom:0.5rem}
+.day-shortcut{flex:1;background:var(--surface);border:1px solid var(--border);color:var(--muted);
+              padding:0.4rem 0;font-family:'DM Mono',monospace;font-size:0.55rem;cursor:pointer;
+              text-align:center;transition:all 0.12s}
+.day-shortcut:hover{background:var(--surface2);color:var(--text)}
+.repeat-hint{font-size:0.58rem;color:var(--muted);margin-bottom:0.75rem;min-height:0.9rem}
 .toast{position:fixed;bottom:1.5rem;right:1.5rem;background:var(--surface2);
        color:var(--text);border:1px solid var(--border);padding:0.5rem 1rem;
        font-size:0.65rem;letter-spacing:0.07em;opacity:0;transition:opacity 0.2s;
@@ -703,6 +722,21 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
       <input type="number" id="alarm_m" min="0" max="59" placeholder="dakika"
              onfocus="onAlarmFocus()" onblur="onAlarmBlur()">
     </div>
+    <div class="day-row">
+      <button class="day-btn" data-d="0" onclick="toggleDay(0)">Paz</button>
+      <button class="day-btn" data-d="1" onclick="toggleDay(1)">Pzt</button>
+      <button class="day-btn" data-d="2" onclick="toggleDay(2)">Sal</button>
+      <button class="day-btn" data-d="3" onclick="toggleDay(3)">Çar</button>
+      <button class="day-btn" data-d="4" onclick="toggleDay(4)">Per</button>
+      <button class="day-btn" data-d="5" onclick="toggleDay(5)">Cum</button>
+      <button class="day-btn" data-d="6" onclick="toggleDay(6)">Cmt</button>
+    </div>
+    <div class="day-shortcuts">
+      <button class="day-shortcut" onclick="setDays(0)">tek sefer</button>
+      <button class="day-shortcut" onclick="setDays(62)">hafta içi</button>
+      <button class="day-shortcut" onclick="setDays(127)">her gün</button>
+    </div>
+    <div class="repeat-hint" id="repeat-hint">tek sefer · çalınca kapanır</div>
     <div class="btn-row">
       <button class="btn green" onclick="setAlarm(true)">aktif et</button>
       <button class="btn"       onclick="setAlarm(false)">kapat</button>
@@ -717,9 +751,28 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
 
 <script>
 const ANIM_TYPES = ['hour','alarm','breath','meteor','radar'];
+const DAY_NAMES  = ['Paz','Pzt','Sal','Çar','Per','Cum','Cmt'];
 let alarmEditing   = false;
 let alarmBlurTimer = null;
 let toastTimer;
+let alarmDays = 0;
+
+function toggleDay(d) { alarmDays ^= (1 << d); updateDayUI(); }
+function setDays(mask) { alarmDays = mask; updateDayUI(); }
+function updateDayUI() {
+  document.querySelectorAll('.day-btn').forEach(btn => {
+    const d = parseInt(btn.dataset.d);
+    btn.classList.toggle('active', (alarmDays & (1 << d)) !== 0);
+  });
+  const hint = document.getElementById('repeat-hint');
+  if      (alarmDays === 0)   hint.textContent = 'tek sefer · çalınca kapanır';
+  else if (alarmDays === 127) hint.textContent = 'her gün tekrar';
+  else if (alarmDays === 62)  hint.textContent = 'hafta içi tekrar';
+  else {
+    const names = DAY_NAMES.filter((_,i) => alarmDays & (1<<i));
+    hint.textContent = names.join(' · ') + ' tekrar';
+  }
+}
 
 function toast(msg, dur=2000) {
   const t = document.getElementById('toast');
@@ -800,6 +853,10 @@ function fetchStatus() {
       if (!alarmEditing) {
         safeSet('alarm_h', d.alarm_h);
         safeSet('alarm_m', d.alarm_m);
+        if (typeof d.alarm_days !== 'undefined') {
+          alarmDays = d.alarm_days;
+          updateDayUI();
+        }
       }
 
       const nightOn = d.night === 'on';
@@ -916,7 +973,7 @@ function setAlarm(enable) {
   const h = document.getElementById('alarm_h').value;
   const m = document.getElementById('alarm_m').value;
   if (enable && (h===''||m==='')) { toast('saat ve dakika girin'); return; }
-  api('/api/alarm?h='+h+'&m='+m+'&en='+(enable?1:0),
+  api('/api/alarm?h='+h+'&m='+m+'&en='+(enable?1:0)+'&days='+alarmDays,
     enable ? 'alarm: '+String(h).padStart(2,'0')+':'+String(m).padStart(2,'0') : 'alarm kapatildi',
     () => setTimeout(fetchStatus, 200));
 }
@@ -983,6 +1040,7 @@ void handleApiStatus() {
     json += "\"alarm_h\":"       + String(myAlarm.hour)               + ",";
     json += "\"alarm_m\":"       + String(myAlarm.minute)             + ",";
     json += "\"alarm_enabled\":" + String(myAlarm.enabled?"true":"false") + ",";
+    json += "\"alarm_days\":"    + String(myAlarm.days)                   + ",";
     json += "\"alarm_firing\":"  + String(alarmFiring?"true":"false");
     json += "}";
     server.send(200, "application/json", json);
@@ -1011,6 +1069,7 @@ void handleApiAlarm() {
         myAlarm.hour   = server.arg("h").toInt();
         myAlarm.minute = server.arg("m").toInt();
     }
+    if (server.hasArg("days")) myAlarm.days = (uint8_t)server.arg("days").toInt();
     server.send(200);
 }
 
