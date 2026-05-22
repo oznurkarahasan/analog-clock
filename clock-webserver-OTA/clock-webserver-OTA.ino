@@ -7,6 +7,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <WebServer.h>
 #include <time.h>
+#include <Preferences.h>
 
 const char* ssid = "p";
 const char* password = "p";
@@ -34,18 +35,17 @@ RTC_DS3231 rtc;
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_RGB + NEO_KHZ800);
 WebServer server(80);
 
-// Varsayılan renkler — STM32 kodundaki değerlerle eşleştirildi
-uint8_t c_saat_r=0, c_saat_g=200, c_saat_b=0;   // Saat ibresi: sarı (breathing ile yeşil geçiş)
-// uint8_t c_dol_r=80,   c_dol_g=0,    c_dol_b=80;    // Dakika dolgu: loş mor
-// uint8_t c_uc_r=60,    c_uc_g=0,     c_uc_b=60;     // Dakika ucu: mor
-uint8_t c_dol_r=80,   c_dol_g=30,   c_dol_b=0;     // Dakika dolgu: loş turuncu
-uint8_t c_uc_r=255,   c_uc_g=80,    c_uc_b=0;      // Dakika ucu: turuncu
-uint8_t c_ana_r=60,   c_ana_g=60,   c_ana_b=60;    // Ana işaret (12/3/6/9): parlak beyaz
-uint8_t c_ara_r=5,    c_ara_g=5,    c_ara_b=5;     // Ara işaret: loş beyaz
+uint8_t c_saat_r=0,   c_saat_g=255, c_saat_b=0;   // Saat ibresi: yeşil
+uint8_t c_dol_r=255,  c_dol_g=0,   c_dol_b=255;   // Dakika dolgu: magenta
+uint8_t c_uc_r=255,   c_uc_g=0,    c_uc_b=255;    // Dakika ucu: magenta
+uint8_t c_ana_r=255,  c_ana_g=255, c_ana_b=255;   // Ana işaret (12/3/6/9): beyaz
+uint8_t c_ara_r=255,  c_ara_g=255, c_ara_b=255;   // Ara işaret: beyaz
 uint8_t brightness_day=80, brightness_night=40;
 
 // Per-color brightness (0-255)
-uint8_t bright_saat=255, bright_dol=18, bright_uc=255, bright_ana=255, bright_ara=255;
+uint8_t bright_saat=255, bright_dol=18, bright_uc=168, bright_ana=195, bright_ara=114;
+
+Preferences prefs;
 
 int  currentMode  = 0;
 int  lastHour     = -1;
@@ -321,6 +321,37 @@ void runRadarAnimation() {
     radarPos = (radarPos + 1) % 60;
 }
 
+void savePrefs() {
+    prefs.begin("clock", false);
+    prefs.putUChar("c_saat_r", c_saat_r); prefs.putUChar("c_saat_g", c_saat_g); prefs.putUChar("c_saat_b", c_saat_b);
+    prefs.putUChar("c_dol_r",  c_dol_r);  prefs.putUChar("c_dol_g",  c_dol_g);  prefs.putUChar("c_dol_b",  c_dol_b);
+    prefs.putUChar("c_uc_r",   c_uc_r);   prefs.putUChar("c_uc_g",   c_uc_g);   prefs.putUChar("c_uc_b",   c_uc_b);
+    prefs.putUChar("c_ana_r",  c_ana_r);  prefs.putUChar("c_ana_g",  c_ana_g);  prefs.putUChar("c_ana_b",  c_ana_b);
+    prefs.putUChar("c_ara_r",  c_ara_r);  prefs.putUChar("c_ara_g",  c_ara_g);  prefs.putUChar("c_ara_b",  c_ara_b);
+    prefs.putUChar("br_saat",  bright_saat);
+    prefs.putUChar("br_dol",   bright_dol);
+    prefs.putUChar("br_uc",    bright_uc);
+    prefs.putUChar("br_ana",   bright_ana);
+    prefs.putUChar("br_ara",   bright_ara);
+    prefs.end();
+}
+
+void loadPrefs() {
+    prefs.begin("clock", true);
+    if (!prefs.isKey("c_saat_r")) { prefs.end(); return; }
+    c_saat_r    = prefs.getUChar("c_saat_r", c_saat_r); c_saat_g    = prefs.getUChar("c_saat_g", c_saat_g); c_saat_b    = prefs.getUChar("c_saat_b", c_saat_b);
+    c_dol_r     = prefs.getUChar("c_dol_r",  c_dol_r);  c_dol_g     = prefs.getUChar("c_dol_g",  c_dol_g);  c_dol_b     = prefs.getUChar("c_dol_b",  c_dol_b);
+    c_uc_r      = prefs.getUChar("c_uc_r",   c_uc_r);   c_uc_g      = prefs.getUChar("c_uc_g",   c_uc_g);   c_uc_b      = prefs.getUChar("c_uc_b",   c_uc_b);
+    c_ana_r     = prefs.getUChar("c_ana_r",  c_ana_r);  c_ana_g     = prefs.getUChar("c_ana_g",  c_ana_g);  c_ana_b     = prefs.getUChar("c_ana_b",  c_ana_b);
+    c_ara_r     = prefs.getUChar("c_ara_r",  c_ara_r);  c_ara_g     = prefs.getUChar("c_ara_g",  c_ara_g);  c_ara_b     = prefs.getUChar("c_ara_b",  c_ara_b);
+    bright_saat = prefs.getUChar("br_saat",  bright_saat);
+    bright_dol  = prefs.getUChar("br_dol",   bright_dol);
+    bright_uc   = prefs.getUChar("br_uc",    bright_uc);
+    bright_ana  = prefs.getUChar("br_ana",   bright_ana);
+    bright_ara  = prefs.getUChar("br_ara",   bright_ara);
+    prefs.end();
+}
+
 void hexToRgb(String hex, uint8_t &r, uint8_t &g, uint8_t &b) {
     if (hex.startsWith("#")) hex = hex.substring(1);
     r = strtol(hex.substring(0,2).c_str(), NULL, 16);
@@ -582,6 +613,10 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
     <span class="range-val" id="br_ara_val">—</span>
   </div>
 
+  <button class="btn full" onclick="resetColors()" style="margin-top:0.75rem;opacity:0.5">
+    varsayılan renklere sıfırla
+  </button>
+
 </div>
 
 <!-- TAB: PARLAKLIK -->
@@ -827,6 +862,10 @@ function api(url, successMsg, cb) {
     .catch(() => toast('baglanti hatasi'));
 }
 
+function resetColors() {
+  if (!confirm('Renk ve parlaklık ayarları varsayılana dönecek. Devam?')) return;
+  api('/api/reset-colors', 'varsayılan renkler yuklendi', () => setTimeout(fetchStatus, 200));
+}
 function setColor(key, val) { api('/api/color?key='+key+'&val='+encodeURIComponent(val)); }
 function setBrightness(type, val) { api('/api/brightness?type='+type+'&val='+val, 'parlaklik: '+val); }
 function setColorBright(key, val) { api('/api/colorbright?key='+key+'&val='+val, key+' parlaklik: '+val); }
@@ -990,6 +1029,7 @@ void handleApiColor() {
     else if (key=="uc")   { c_uc_r=r;   c_uc_g=g;   c_uc_b=b;   }
     else if (key=="ana")  { c_ana_r=r;  c_ana_g=g;  c_ana_b=b;  }
     else if (key=="ara")  { c_ara_r=r;  c_ara_g=g;  c_ara_b=b;  }
+    savePrefs();
     server.send(200);
 }
 
@@ -1002,6 +1042,7 @@ void handleApiColorBright() {
     else if (key=="uc")   bright_uc   = val;
     else if (key=="ana")  bright_ana  = val;
     else if (key=="ara")  bright_ara  = val;
+    savePrefs();
     server.send(200);
 }
 
@@ -1040,12 +1081,26 @@ void handleApiSetTime() {
     server.send(200);
 }
 
+void handleApiResetColors() {
+    prefs.begin("clock", false);
+    prefs.clear();
+    prefs.end();
+    c_saat_r=0;   c_saat_g=255; c_saat_b=0;
+    c_dol_r=255;  c_dol_g=0;   c_dol_b=255;
+    c_uc_r=255;   c_uc_g=0;    c_uc_b=255;
+    c_ana_r=255;  c_ana_g=255; c_ana_b=255;
+    c_ara_r=255;  c_ara_g=255; c_ara_b=255;
+    bright_saat=255; bright_dol=18; bright_uc=168; bright_ana=195; bright_ara=114;
+    server.send(200);
+}
+
 // =====================================================================
 // SETUP & LOOP
 // =====================================================================
 
 void setup() {
     Serial.begin(115200);
+    loadPrefs();
 
     pinMode(BUTTON_HOUR_UP,   INPUT_PULLUP);
     pinMode(BUTTON_HOUR_DOWN, INPUT_PULLUP);
@@ -1076,6 +1131,7 @@ void setup() {
     server.on("/api/night",      handleApiNight);
     server.on("/api/ntp",        handleApiNtp);
     server.on("/api/settime",    handleApiSetTime);
+    server.on("/api/reset-colors", handleApiResetColors);
     server.begin();
 
     if (!rtc.begin()) { Serial.println("RTC yok!"); while (1); }
