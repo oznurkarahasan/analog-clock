@@ -515,10 +515,14 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
 .btn:disabled{opacity:0.35;cursor:not-allowed;pointer-events:none}
 .pair{display:flex;gap:1px;margin-bottom:0.75rem}
 .pair input{flex:1;width:auto}
-.alarm-section .pair input{transition:border-color 0.2s}
-.alarm-section.editing .pair input{border-color:var(--amber);outline:1px solid var(--amber)}
 .alarm-hint{font-size:0.6rem;color:var(--muted);margin-bottom:0.6rem;min-height:0.9rem}
 .alarm-hint.active{color:var(--amber)}
+input[type="time"]{background:var(--surface2);border:1px solid var(--border);
+                   color:var(--text);padding:0.5rem 0.75rem;font-family:'DM Mono',monospace;
+                   font-size:1.2rem;width:100%;text-align:center;display:block;
+                   margin-bottom:0.75rem;letter-spacing:0.06em}
+input[type="time"]:focus{outline:1px solid var(--accent);border-color:var(--accent)}
+.alarm-section.editing input[type="time"]{border-color:var(--amber);outline:1px solid var(--amber)}
 .anim-grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;margin-bottom:1px}
 .anim-card{background:var(--surface);border:1px solid var(--border);
            padding:0.8rem 0.75rem;cursor:pointer;transition:all 0.12s;text-align:left}
@@ -716,13 +720,8 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
 
   <span class="slabel">alarm</span>
   <div class="alarm-section" id="alarm-section">
-    <div class="alarm-hint" id="alarm-hint">saat ve dakika gir, aktif et'e bas</div>
-    <div class="pair" id="alarm-pair">
-      <input type="number" id="alarm_h" min="0" max="23" placeholder="saat"
-             onfocus="onAlarmFocus()" onblur="onAlarmBlur()">
-      <input type="number" id="alarm_m" min="0" max="59" placeholder="dakika"
-             onfocus="onAlarmFocus()" onblur="onAlarmBlur()">
-    </div>
+    <div class="alarm-hint" id="alarm-hint">alarm saatini seç, aktif et'e bas</div>
+    <input type="time" id="alarm_time" onfocus="onAlarmFocus()" onblur="onAlarmBlur()">
     <div class="day-row">
       <button class="day-btn" data-d="0" onclick="toggleDay(0)">Paz</button>
       <button class="day-btn" data-d="1" onclick="toggleDay(1)">Pzt</button>
@@ -827,7 +826,7 @@ function onAlarmBlur() {
     alarmEditing = false;
     document.getElementById('alarm-section').classList.remove('editing');
     const hint = document.getElementById('alarm-hint');
-    hint.textContent = 'saat ve dakika gir, aktif et\'e bas';
+    hint.textContent = 'alarm saatini seç, aktif et\'e bas';
     hint.classList.remove('active');
   }, 200);
 }
@@ -866,8 +865,15 @@ function fetchStatus() {
       }
 
       if (!alarmEditing) {
-        safeSet('alarm_h', d.alarm_h);
-        safeSet('alarm_m', d.alarm_m);
+        const at = document.getElementById('alarm_time');
+        if (at && document.activeElement !== at) {
+          const isEnabled = d.alarm_enabled === true || d.alarm_enabled === 'true';
+          if (isEnabled) {
+            at.value = String(d.alarm_h).padStart(2,'0')+':'+String(d.alarm_m).padStart(2,'0');
+          } else if (_clockBase) {
+            at.value = String(_clockBase.h).padStart(2,'0')+':'+String(_clockBase.m).padStart(2,'0');
+          }
+        }
         if (typeof d.alarm_days !== 'undefined') {
           alarmDays = d.alarm_days;
           updateDayUI();
@@ -983,11 +989,12 @@ function setAlarm(enable) {
   clearTimeout(alarmBlurTimer);
   document.getElementById('alarm-section').classList.remove('editing');
   const hint = document.getElementById('alarm-hint');
-  hint.textContent = 'saat ve dakika gir, aktif et\'e bas';
+  hint.textContent = 'alarm saatini seç, aktif et\'e bas';
   hint.classList.remove('active');
-  const h = document.getElementById('alarm_h').value;
-  const m = document.getElementById('alarm_m').value;
-  if (enable && (h===''||m==='')) { toast('saat ve dakika girin'); return; }
+  const timeVal = document.getElementById('alarm_time').value;
+  if (enable && !timeVal) { toast('saat seçin'); return; }
+  const parts = timeVal ? timeVal.split(':') : ['0','0'];
+  const h = parseInt(parts[0]), m = parseInt(parts[1]);
   api('/api/alarm?h='+h+'&m='+m+'&en='+(enable?1:0)+'&days='+alarmDays,
     enable ? 'alarm: '+String(h).padStart(2,'0')+':'+String(m).padStart(2,'0') : 'alarm kapatildi',
     () => setTimeout(fetchStatus, 200));
