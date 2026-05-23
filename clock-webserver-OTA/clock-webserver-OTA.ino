@@ -48,6 +48,7 @@ uint8_t bright_saat=255, bright_dol=18, bright_uc=168, bright_ana=195, bright_ar
 Preferences prefs;
 
 int  currentMode  = 0;
+int  prevMode     = 0;
 int  lastHour     = -1;
 bool animRunning  = false;
 int  animStep     = 0;
@@ -219,7 +220,7 @@ void runHourAnimation() {
     if (animStep >= 120) {
         animRunning  = false;
         animStep     = 0;
-        currentMode  = 0;
+        currentMode  = prevMode;
         strip.setBrightness(isNightMode ? brightness_night : brightness_day);
     }
 }
@@ -327,6 +328,59 @@ void runRadarAnimation() {
 
     strip.show();
     radarPos = (radarPos + 1) % 60;
+}
+
+void runHourFillDisplay(DateTime t) {
+    strip.clear();
+    int hr    = t.hour() % 12;
+    int mn    = t.minute();
+    int hrPos = hr * 5;
+
+    // Geçmiş saatler — sabit renk
+    for (int i = 0; i < hr; i++) {
+        strip.setPixelColor(i * 5, strip.Color(
+            applyBright(c_saat_r, bright_saat),
+            applyBright(c_saat_g, bright_saat),
+            applyBright(c_saat_b, bright_saat)));
+    }
+
+    // Mevcut saat — yeşil pulse animasyonu (normal modla aynı)
+    x += 5;
+    if (x >= 510) x = 1;
+    uint32_t hourColor;
+    if (x <= 255) {
+        hourColor = strip.Color(0, x, 20);
+    } else {
+        hourColor = strip.Color(20, 510 - x, 20);
+    }
+    strip.setPixelColor(hrPos, hourColor);
+
+    // Dakika ibresi
+    strip.setPixelColor(mn, strip.Color(
+        applyBright(c_uc_r, bright_uc),
+        applyBright(c_uc_g, bright_uc),
+        applyBright(c_uc_b, bright_uc)));
+
+    // Saniye animasyonu (STM32 ile aynı)
+    int sc = t.second();
+    if (sc != lastSecond) {
+        lastSecond   = sc;
+        secAnimStart = millis();
+        secAnimActive = true;
+    }
+    uint8_t secJ = 0;
+    if (secAnimActive) {
+        unsigned long elapsed = millis() - secAnimStart;
+        if (elapsed < 765) {
+            secJ = 255 - (uint8_t)(elapsed * 255UL / 765);
+        } else {
+            secAnimActive = false;
+            secJ = 0;
+        }
+    }
+    strip.setPixelColor(sc, secAnimActive ? WheelOriginal(secJ & 255) : WheelOriginal(0));
+
+    strip.show();
 }
 
 void savePrefs() {
@@ -708,6 +762,7 @@ input[type="time"]:focus,input[type="date"]:focus{outline:1px solid var(--accent
   <span class="slabel">mod</span>
   <div class="btn-row">
     <button class="btn active" id="btn_mode0" onclick="setMode(0)">normal saat</button>
+    <button class="btn" id="btn_mode6" onclick="setMode(6)">saat dolumu</button>
   </div>
 
   <span class="slabel">gece modu</span>
@@ -962,6 +1017,7 @@ function fetchStatus() {
 
       document.getElementById('lbl-mode').textContent = d.mode;
       document.getElementById('btn_mode0').classList.toggle('active', d.mode_num === 0);
+      document.getElementById('btn_mode6').classList.toggle('active', d.mode_num === 6);
 
       ['night_on','night_off','night_auto'].forEach(id =>
         document.getElementById('btn_'+id).classList.remove('active'));
@@ -1024,8 +1080,9 @@ function setBrightness(type, val) { api('/api/brightness?type='+type+'&val='+val
 function setColorBright(key, val) { api('/api/colorbright?key='+key+'&val='+val, key+' parlaklik: '+val); }
 
 function setMode(m) {
-  document.getElementById('btn_mode0').classList.add('active');
-  api('/api/mode?val='+m, 'normal moda donuldu');
+  document.getElementById('btn_mode0').classList.toggle('active', m === 0);
+  document.getElementById('btn_mode6').classList.toggle('active', m === 6);
+  api('/api/mode?val='+m, m === 0 ? 'normal moda donuldu' : 'saat dolumu modu');
 }
 
 function nightMode(val) {
@@ -1130,6 +1187,7 @@ void handleApiStatus() {
         case 3: modeName = "nefes";     break;
         case 4: modeName = "meteor";    break;
         case 5: modeName = "radar";     break;
+        case 6: modeName = "saat dolumu"; break;
         default: modeName = "normal";
     }
 
@@ -1259,6 +1317,7 @@ void handleApiMode() {
     if (!server.hasArg("val")) { server.send(400); return; }
     int m = server.arg("val").toInt();
     if (m == 0) stopAlarmNow();
+    else if (m == 6) { currentMode = 6; animRunning = false; strip.setBrightness(isNightMode ? brightness_night : brightness_day); }
     else { currentMode=m; animRunning=true; animStep=0; lastAnimUpdate=millis(); }
     server.send(200);
 }
@@ -1361,9 +1420,10 @@ void loop() {
 
     checkAlarm(now);
 
-    if (!alarmFiring && currentMode == 0 &&
+    if (!alarmFiring && (currentMode == 0 || currentMode == 6) &&
         now.minute() == 0 && now.second() == 0 && now.hour() != lastHour) {
         lastHour       = now.hour();
+        prevMode       = currentMode;
         currentMode    = 1;
         animRunning    = true;
         animStep       = 0;
@@ -1399,6 +1459,12 @@ void loop() {
         runMeteorAnimation();
     } else if (currentMode == 5) {
         runRadarAnimation();
+    } else if (currentMode == 6) {
+        static unsigned long lastHFUpdate = 0;
+        if (millis() - lastHFUpdate >= 20) {
+            lastHFUpdate = millis();
+            runHourFillDisplay(now);
+        }
     } else {
         currentMode = 0;
         static unsigned long lastUpdate = 0;
