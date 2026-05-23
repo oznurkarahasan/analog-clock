@@ -7,9 +7,10 @@
 #include <Adafruit_NeoPixel.h>
 #include <WebServer.h>
 #include <time.h>
+#include <Preferences.h>
 
-const char* ssid = "wifi";
-const char* password = "password";
+const char* ssid = "p";
+const char* password = "p";
 
 #define LED_PIN     4
 #define NUM_LEDS    61
@@ -34,20 +35,20 @@ RTC_DS3231 rtc;
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_RGB + NEO_KHZ800);
 WebServer server(80);
 
-// Varsayılan renkler — STM32 kodundaki değerlerle eşleştirildi
-uint8_t c_saat_r=0, c_saat_g=200, c_saat_b=0;   // Saat ibresi: sarı (breathing ile yeşil geçiş)
-// uint8_t c_dol_r=80,   c_dol_g=0,    c_dol_b=80;    // Dakika dolgu: loş mor
-// uint8_t c_uc_r=60,    c_uc_g=0,     c_uc_b=60;     // Dakika ucu: mor
-uint8_t c_dol_r=80,   c_dol_g=30,   c_dol_b=0;     // Dakika dolgu: loş turuncu
-uint8_t c_uc_r=255,   c_uc_g=80,    c_uc_b=0;      // Dakika ucu: turuncu
-uint8_t c_ana_r=60,   c_ana_g=60,   c_ana_b=60;    // Ana işaret (12/3/6/9): parlak beyaz
-uint8_t c_ara_r=5,    c_ara_g=5,    c_ara_b=5;     // Ara işaret: loş beyaz
+uint8_t c_saat_r=0,   c_saat_g=255, c_saat_b=0;   // Saat ibresi: yeşil
+uint8_t c_dol_r=255,  c_dol_g=0,   c_dol_b=255;   // Dakika dolgu: magenta
+uint8_t c_uc_r=255,   c_uc_g=0,    c_uc_b=255;    // Dakika ucu: magenta
+uint8_t c_ana_r=255,  c_ana_g=255, c_ana_b=255;   // Ana işaret (12/3/6/9): beyaz
+uint8_t c_ara_r=255,  c_ara_g=255, c_ara_b=255;   // Ara işaret: beyaz
 uint8_t brightness_day=80, brightness_night=40;
 
 // Per-color brightness (0-255)
-uint8_t bright_saat=255, bright_dol=18, bright_uc=255, bright_ana=255, bright_ara=255;
+uint8_t bright_saat=255, bright_dol=18, bright_uc=168, bright_ana=195, bright_ara=114;
+
+Preferences prefs;
 
 int  currentMode  = 0;
+int  prevMode     = 0;
 int  lastHour     = -1;
 bool animRunning  = false;
 int  animStep     = 0;
@@ -57,9 +58,14 @@ bool autoNight    = true;
 unsigned long lastNtpSync = 0;
 
 struct AlarmClock {
-    int  hour    = 7;
-    int  minute  = 0;
-    bool enabled = false;
+    int     hour    = 7;
+    int     minute  = 0;
+    bool    enabled = false;
+    uint8_t days    = 0;
+    bool    useDate = false;
+    int     year    = 2026;
+    int     month   = 1;
+    int     day     = 1;
 };
 AlarmClock myAlarm;
 bool  alarmFiring     = false;
@@ -75,6 +81,7 @@ uint8_t radarTrail[60] = {0};
 int  lastSecond  = -1;               // Saniye değişimini tespit etmek için
 unsigned long secAnimStart = 0;      // Saniye animasyonu başlangıç zamanı
 bool secAnimActive = false;          // Saniye animasyonu aktif mi
+long x = 1;                          // Saat ibresi pulse animasyonu için
 
 // Per-color brightness helper
 inline uint8_t applyBright(uint8_t val, uint8_t bright) {
@@ -175,15 +182,17 @@ void updateClockDisplay(DateTime t) {
         applyBright(c_uc_g, bright_uc),
         applyBright(c_uc_b, bright_uc)));
 
-    // 5) Saat ibresi — sabit yeşil, blink (1000ms döngü: 700ms açık, 300ms kapalı)
-    if (millis() % 1000 < 700) {
-        strip.setPixelColor(hrPos, strip.Color(
-            applyBright(c_saat_r, bright_saat),
-            applyBright(c_saat_g, bright_saat),
-            applyBright(c_saat_b, bright_saat)));
+    // 5) Saat ibresi — yeşil pulse animasyonu (STM32 ile aynı hız: x+=5 @20ms ≈ 250 adım/sn)
+    x += 5;
+    if (x >= 510) x = 1;
+
+    uint32_t hourColor;
+    if (x <= 255) {
+        hourColor = strip.Color(0, x, 20);
     } else {
-        strip.setPixelColor(hrPos, strip.Color(0, 0, 0));
+        hourColor = strip.Color(20, 510 - x, 20);
     }
+    strip.setPixelColor(hrPos, hourColor);
 
     // 6) Saniye LED'i — STM32'deki Wheel gökkuşağı geçişi
     if (secAnimActive) {
@@ -211,7 +220,7 @@ void runHourAnimation() {
     if (animStep >= 120) {
         animRunning  = false;
         animStep     = 0;
-        currentMode  = 0;
+        currentMode  = prevMode;
         strip.setBrightness(isNightMode ? brightness_night : brightness_day);
     }
 }
@@ -321,6 +330,117 @@ void runRadarAnimation() {
     radarPos = (radarPos + 1) % 60;
 }
 
+void runHourFillDisplay(DateTime t) {
+    strip.clear();
+    int hr    = t.hour() % 12;
+    int mn    = t.minute();
+    int hrPos = hr * 5;
+
+    // Geçmiş saatler — sabit renk
+    for (int i = 0; i < hr; i++) {
+        strip.setPixelColor(i * 5, strip.Color(
+            applyBright(c_saat_r, bright_saat),
+            applyBright(c_saat_g, bright_saat),
+            applyBright(c_saat_b, bright_saat)));
+    }
+
+    // Mevcut saat — yeşil pulse animasyonu (normal modla aynı)
+    x += 5;
+    if (x >= 510) x = 1;
+    uint32_t hourColor;
+    if (x <= 255) {
+        hourColor = strip.Color(0, x, 20);
+    } else {
+        hourColor = strip.Color(20, 510 - x, 20);
+    }
+    strip.setPixelColor(hrPos, hourColor);
+
+    // Dakika ibresi
+    strip.setPixelColor(mn, strip.Color(
+        applyBright(c_uc_r, bright_uc),
+        applyBright(c_uc_g, bright_uc),
+        applyBright(c_uc_b, bright_uc)));
+
+    // Saniye animasyonu (STM32 ile aynı)
+    int sc = t.second();
+    if (sc != lastSecond) {
+        lastSecond   = sc;
+        secAnimStart = millis();
+        secAnimActive = true;
+    }
+    uint8_t secJ = 0;
+    if (secAnimActive) {
+        unsigned long elapsed = millis() - secAnimStart;
+        if (elapsed < 765) {
+            secJ = 255 - (uint8_t)(elapsed * 255UL / 765);
+        } else {
+            secAnimActive = false;
+            secJ = 0;
+        }
+    }
+    strip.setPixelColor(sc, secAnimActive ? WheelOriginal(secJ & 255) : WheelOriginal(0));
+
+    strip.show();
+}
+
+void savePrefs() {
+    prefs.begin("clock", false);
+    prefs.putUChar("c_saat_r", c_saat_r); prefs.putUChar("c_saat_g", c_saat_g); prefs.putUChar("c_saat_b", c_saat_b);
+    prefs.putUChar("c_dol_r",  c_dol_r);  prefs.putUChar("c_dol_g",  c_dol_g);  prefs.putUChar("c_dol_b",  c_dol_b);
+    prefs.putUChar("c_uc_r",   c_uc_r);   prefs.putUChar("c_uc_g",   c_uc_g);   prefs.putUChar("c_uc_b",   c_uc_b);
+    prefs.putUChar("c_ana_r",  c_ana_r);  prefs.putUChar("c_ana_g",  c_ana_g);  prefs.putUChar("c_ana_b",  c_ana_b);
+    prefs.putUChar("c_ara_r",  c_ara_r);  prefs.putUChar("c_ara_g",  c_ara_g);  prefs.putUChar("c_ara_b",  c_ara_b);
+    prefs.putUChar("br_saat",  bright_saat);
+    prefs.putUChar("br_dol",   bright_dol);
+    prefs.putUChar("br_uc",    bright_uc);
+    prefs.putUChar("br_ana",   bright_ana);
+    prefs.putUChar("br_ara",   bright_ara);
+    prefs.end();
+}
+
+void loadPrefs() {
+    prefs.begin("clock", true);
+    if (!prefs.isKey("c_saat_r")) { prefs.end(); return; }
+    c_saat_r    = prefs.getUChar("c_saat_r", c_saat_r); c_saat_g    = prefs.getUChar("c_saat_g", c_saat_g); c_saat_b    = prefs.getUChar("c_saat_b", c_saat_b);
+    c_dol_r     = prefs.getUChar("c_dol_r",  c_dol_r);  c_dol_g     = prefs.getUChar("c_dol_g",  c_dol_g);  c_dol_b     = prefs.getUChar("c_dol_b",  c_dol_b);
+    c_uc_r      = prefs.getUChar("c_uc_r",   c_uc_r);   c_uc_g      = prefs.getUChar("c_uc_g",   c_uc_g);   c_uc_b      = prefs.getUChar("c_uc_b",   c_uc_b);
+    c_ana_r     = prefs.getUChar("c_ana_r",  c_ana_r);  c_ana_g     = prefs.getUChar("c_ana_g",  c_ana_g);  c_ana_b     = prefs.getUChar("c_ana_b",  c_ana_b);
+    c_ara_r     = prefs.getUChar("c_ara_r",  c_ara_r);  c_ara_g     = prefs.getUChar("c_ara_g",  c_ara_g);  c_ara_b     = prefs.getUChar("c_ara_b",  c_ara_b);
+    bright_saat = prefs.getUChar("br_saat",  bright_saat);
+    bright_dol  = prefs.getUChar("br_dol",   bright_dol);
+    bright_uc   = prefs.getUChar("br_uc",    bright_uc);
+    bright_ana  = prefs.getUChar("br_ana",   bright_ana);
+    bright_ara  = prefs.getUChar("br_ara",   bright_ara);
+    prefs.end();
+}
+
+void saveAlarmPrefs() {
+    prefs.begin("alarm", false);
+    prefs.putInt("al_h",      myAlarm.hour);
+    prefs.putInt("al_m",      myAlarm.minute);
+    prefs.putBool("al_en",    myAlarm.enabled);
+    prefs.putUChar("al_days", myAlarm.days);
+    prefs.putBool("al_ud",    myAlarm.useDate);
+    prefs.putInt("al_yr",     myAlarm.year);
+    prefs.putInt("al_mo",     myAlarm.month);
+    prefs.putInt("al_dy",     myAlarm.day);
+    prefs.end();
+}
+
+void loadAlarmPrefs() {
+    prefs.begin("alarm", true);
+    if (!prefs.isKey("al_h")) { prefs.end(); return; }
+    myAlarm.hour    = prefs.getInt("al_h",      myAlarm.hour);
+    myAlarm.minute  = prefs.getInt("al_m",      myAlarm.minute);
+    myAlarm.enabled = prefs.getBool("al_en",    myAlarm.enabled);
+    myAlarm.days    = prefs.getUChar("al_days", myAlarm.days);
+    myAlarm.useDate = prefs.getBool("al_ud",    myAlarm.useDate);
+    myAlarm.year    = prefs.getInt("al_yr",     myAlarm.year);
+    myAlarm.month   = prefs.getInt("al_mo",     myAlarm.month);
+    myAlarm.day     = prefs.getInt("al_dy",     myAlarm.day);
+    prefs.end();
+}
+
 void hexToRgb(String hex, uint8_t &r, uint8_t &g, uint8_t &b) {
     if (hex.startsWith("#")) hex = hex.substring(1);
     r = strtol(hex.substring(0,2).c_str(), NULL, 16);
@@ -371,11 +491,32 @@ void triggerAlarm() {
     lastAlarmUpdate = millis();
     currentMode     = 2;
 }
+int lastAlarmMinute = -1;
 
 void checkAlarm(DateTime now) {
     if (!myAlarm.enabled || alarmFiring) return;
-    if (now.hour()==myAlarm.hour && now.minute()==myAlarm.minute && now.second()==0)
-        triggerAlarm();
+
+    bool shouldFire = (now.hour() == myAlarm.hour && now.minute() == myAlarm.minute);
+
+    if (shouldFire && lastAlarmMinute != now.minute()) {
+        bool ok = false;
+        if (myAlarm.useDate) {
+            ok = (now.year() == myAlarm.year && now.month() == myAlarm.month && now.day() == myAlarm.day);
+        } else if (myAlarm.days != 0) {
+            ok = (myAlarm.days & (1 << now.dayOfTheWeek())) != 0;
+        } else {
+            ok = true;
+        }
+        if (ok) {
+            lastAlarmMinute = now.minute();
+            triggerAlarm();
+            if (myAlarm.useDate || myAlarm.days == 0) { myAlarm.enabled = false; saveAlarmPrefs(); }
+        }
+    }
+
+    if (!shouldFire) {
+        lastAlarmMinute = -1;
+    }
 }
 
 void startExtraAnim(int mode) {
@@ -400,10 +541,11 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{font-size:20px}
 :root{
-  --bg:#0a0a0a;--surface:#141414;--surface2:#1c1c1c;
-  --border:#252525;--text:#e0e0e0;--muted:#555;--accent:#fff;
-  --green:#00e676;--red:#ff5252;--amber:#ffab40;
+  --bg:#fdf5e0;--surface:#f0e8d0;--surface2:#e5dbc4;
+  --border:#c8ba9a;--text:#281e10;--muted:#7a6a54;--accent:#281e10;
+  --green:#1a8a6e;--red:#c0392b;--amber:#9a7200;
 }
 body{background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;min-height:100vh}
 .header{padding:1.5rem 1.5rem 0;display:flex;justify-content:space-between;align-items:flex-start}
@@ -413,6 +555,7 @@ body{background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;min-
 .clock-wrap{padding:2rem 1.5rem 1.5rem;border-bottom:1px solid var(--border)}
 .clock{font-size:4rem;font-weight:300;letter-spacing:-0.03em;color:var(--accent);
        font-variant-numeric:tabular-nums;line-height:1}
+.clock-date{font-size:0.65rem;color:var(--muted);letter-spacing:0.1em;margin-top:0.3rem}
 .clock-sub{margin-top:0.5rem;font-size:0.6rem;color:var(--muted);
            letter-spacing:0.1em;display:flex;gap:1.5rem;flex-wrap:wrap}
 .dot{display:inline-block;width:5px;height:5px;border-radius:50%;margin-right:0.4rem;vertical-align:middle}
@@ -465,10 +608,15 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
 .btn:disabled{opacity:0.35;cursor:not-allowed;pointer-events:none}
 .pair{display:flex;gap:1px;margin-bottom:0.75rem}
 .pair input{flex:1;width:auto}
-.alarm-section .pair input{transition:border-color 0.2s}
-.alarm-section.editing .pair input{border-color:var(--amber);outline:1px solid var(--amber)}
 .alarm-hint{font-size:0.6rem;color:var(--muted);margin-bottom:0.6rem;min-height:0.9rem}
 .alarm-hint.active{color:var(--amber)}
+input[type="time"],input[type="date"]{background:var(--surface2);border:1px solid var(--border);
+                   color:var(--text);padding:0.5rem 0.75rem;font-family:'DM Mono',monospace;
+                   font-size:1.2rem;width:100%;text-align:center;display:block;
+                   margin-bottom:0.75rem;letter-spacing:0.06em}
+input[type="time"]:focus,input[type="date"]:focus{outline:1px solid var(--accent);border-color:var(--accent)}
+.alarm-section.editing input[type="time"],
+.alarm-section.editing input[type="date"]{border-color:var(--amber);outline:1px solid var(--amber)}
 .anim-grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;margin-bottom:1px}
 .anim-card{background:var(--surface);border:1px solid var(--border);
            padding:0.8rem 0.75rem;cursor:pointer;transition:all 0.12s;text-align:left}
@@ -476,6 +624,17 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
 .anim-card.running{border-color:var(--green);background:var(--surface2)}
 .anim-card-title{font-size:0.65rem;color:var(--text);letter-spacing:0.05em;display:block;margin-bottom:0.2rem}
 .anim-card-sub{font-size:0.58rem;color:var(--muted)}
+.day-row{display:flex;gap:1px;margin-bottom:0.5rem}
+.day-btn{flex:1;background:var(--surface);border:1px solid var(--border);color:var(--muted);
+         padding:0.5rem 0;font-family:'DM Mono',monospace;font-size:0.58rem;cursor:pointer;
+         text-align:center;transition:all 0.12s;user-select:none}
+.day-btn.active{border-color:var(--accent);color:var(--accent);background:var(--surface2)}
+.day-shortcuts{display:flex;gap:1px;margin-bottom:0.5rem}
+.day-shortcut{flex:1;background:var(--surface);border:1px solid var(--border);color:var(--muted);
+              padding:0.4rem 0;font-family:'DM Mono',monospace;font-size:0.55rem;cursor:pointer;
+              text-align:center;transition:all 0.12s}
+.day-shortcut:hover{background:var(--surface2);color:var(--text)}
+.repeat-hint{font-size:0.58rem;color:var(--muted);margin-bottom:0.75rem;min-height:0.9rem}
 .toast{position:fixed;bottom:1.5rem;right:1.5rem;background:var(--surface2);
        color:var(--text);border:1px solid var(--border);padding:0.5rem 1rem;
        font-size:0.65rem;letter-spacing:0.07em;opacity:0;transition:opacity 0.2s;
@@ -492,6 +651,7 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
 
 <div class="clock-wrap">
   <div class="clock" id="clock">--:--:--</div>
+  <div class="clock-date" id="clock-date">—</div>
   <div class="clock-sub">
     <span><span class="dot off" id="dot-night"></span><span id="lbl-night">gündüz</span></span>
     <span><span class="dot off" id="dot-ntp"></span><span id="lbl-ntp">ntp —</span></span>
@@ -572,6 +732,10 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
     <span class="range-val" id="br_ara_val">—</span>
   </div>
 
+  <button class="btn full" onclick="resetColors()" style="margin-top:0.75rem;opacity:0.5">
+    varsayılan renklere sıfırla
+  </button>
+
 </div>
 
 <!-- TAB: PARLAKLIK -->
@@ -598,6 +762,7 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
   <span class="slabel">mod</span>
   <div class="btn-row">
     <button class="btn active" id="btn_mode0" onclick="setMode(0)">normal saat</button>
+    <button class="btn" id="btn_mode6" onclick="setMode(6)">saat dolumu</button>
   </div>
 
   <span class="slabel">gece modu</span>
@@ -651,19 +816,40 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
 
   <span class="slabel">alarm</span>
   <div class="alarm-section" id="alarm-section">
-    <div class="alarm-hint" id="alarm-hint">saat ve dakika gir, aktif et'e bas</div>
-    <div class="pair" id="alarm-pair">
-      <input type="number" id="alarm_h" min="0" max="23" placeholder="saat"
-             onfocus="onAlarmFocus()" onblur="onAlarmBlur()">
-      <input type="number" id="alarm_m" min="0" max="59" placeholder="dakika"
-             onfocus="onAlarmFocus()" onblur="onAlarmBlur()">
+    <div class="alarm-hint" id="alarm-hint">alarm saatini seç, aktif et'e bas</div>
+    <div class="btn-row" style="margin-bottom:0.75rem">
+      <button class="btn active" id="btn_mode_weekly" onclick="setAlarmMode('weekly',true)">haftalık</button>
+      <button class="btn"        id="btn_mode_dated"  onclick="setAlarmMode('dated',true)">tarihli</button>
+    </div>
+    <input type="time" id="alarm_time" onfocus="onAlarmFocus()" onblur="onAlarmBlur()">
+    <input type="date" id="alarm_date" style="display:none" onfocus="onAlarmFocus()" onblur="onAlarmBlur()">
+    <div id="weekly-opts">
+      <div class="day-row">
+        <button class="day-btn" data-d="0" onclick="toggleDay(0)">Paz</button>
+        <button class="day-btn" data-d="1" onclick="toggleDay(1)">Pzt</button>
+        <button class="day-btn" data-d="2" onclick="toggleDay(2)">Sal</button>
+        <button class="day-btn" data-d="3" onclick="toggleDay(3)">Çar</button>
+        <button class="day-btn" data-d="4" onclick="toggleDay(4)">Per</button>
+        <button class="day-btn" data-d="5" onclick="toggleDay(5)">Cum</button>
+        <button class="day-btn" data-d="6" onclick="toggleDay(6)">Cmt</button>
+      </div>
+      <div class="day-shortcuts">
+        <button class="day-shortcut" onclick="setDays(0)">tek sefer</button>
+        <button class="day-shortcut" onclick="setDays(62)">hafta içi</button>
+        <button class="day-shortcut" onclick="setDays(127)">her gün</button>
+      </div>
+      <div class="repeat-hint" id="repeat-hint">tek sefer · çalınca kapanır</div>
     </div>
     <div class="btn-row">
       <button class="btn green" onclick="setAlarm(true)">aktif et</button>
       <button class="btn"       onclick="setAlarm(false)">kapat</button>
     </div>
-    <button class="btn full red" id="btn_alarm_stop" onclick="stopAlarmBtn()"
-            style="display:none;margin-top:1px">alarmı durdur</button>
+    <div id="alarm-fire-row" style="display:none;margin-top:1px">
+      <div class="btn-row">
+        <button class="btn red"   onclick="stopAlarmBtn()">durdur</button>
+        <button class="btn amber" onclick="snoozeAlarmBtn()">5 dk ertele</button>
+      </div>
+    </div>
   </div>
 
 </div>
@@ -672,9 +858,49 @@ input[type="number"]:focus{outline:1px solid var(--accent);border-color:var(--ac
 
 <script>
 const ANIM_TYPES = ['hour','alarm','breath','meteor','radar'];
+const DAY_NAMES  = ['Paz','Pzt','Sal','Çar','Per','Cum','Cmt'];
 let alarmEditing   = false;
 let alarmBlurTimer = null;
 let toastTimer;
+let alarmDays = 0;
+let alarmMode = 'weekly';
+
+function setAlarmMode(mode, fromUser) {
+  if (fromUser) onAlarmFocus();
+  alarmMode = mode;
+  document.getElementById('btn_mode_weekly').classList.toggle('active', mode === 'weekly');
+  document.getElementById('btn_mode_dated').classList.toggle('active', mode === 'dated');
+  document.getElementById('weekly-opts').style.display = mode === 'weekly' ? '' : 'none';
+  document.getElementById('alarm_date').style.display  = mode === 'dated'  ? 'block' : 'none';
+}
+
+let _clockBase = null, _clockBaseAt = 0;
+function tickClock() {
+  if (!_clockBase) return;
+  const el = document.getElementById('clock'); if (!el) return;
+  const s0 = _clockBase.s + Math.round((Date.now() - _clockBaseAt) / 1000);
+  let s = s0 % 60, carry = Math.floor(s0 / 60);
+  let m = (_clockBase.m + carry) % 60; carry = Math.floor((_clockBase.m + carry) / 60);
+  let h = (_clockBase.h + carry) % 24;
+  el.textContent = String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+}
+
+function toggleDay(d) { alarmDays ^= (1 << d); updateDayUI(); }
+function setDays(mask) { alarmDays = mask; updateDayUI(); }
+function updateDayUI() {
+  document.querySelectorAll('.day-btn').forEach(btn => {
+    const d = parseInt(btn.dataset.d);
+    btn.classList.toggle('active', (alarmDays & (1 << d)) !== 0);
+  });
+  const hint = document.getElementById('repeat-hint');
+  if      (alarmDays === 0)   hint.textContent = 'tek sefer · çalınca kapanır';
+  else if (alarmDays === 127) hint.textContent = 'her gün tekrar';
+  else if (alarmDays === 62)  hint.textContent = 'hafta içi tekrar';
+  else {
+    const names = DAY_NAMES.filter((_,i) => alarmDays & (1<<i));
+    hint.textContent = names.join(' · ') + ' tekrar';
+  }
+}
 
 function toast(msg, dur=2000) {
   const t = document.getElementById('toast');
@@ -717,7 +943,7 @@ function onAlarmBlur() {
     alarmEditing = false;
     document.getElementById('alarm-section').classList.remove('editing');
     const hint = document.getElementById('alarm-hint');
-    hint.textContent = 'saat ve dakika gir, aktif et\'e bas';
+    hint.textContent = 'alarm saatini seç, aktif et\'e bas';
     hint.classList.remove('active');
   }, 200);
 }
@@ -728,8 +954,11 @@ function fetchStatus() {
   fetch('/api/status', {signal: AbortSignal.timeout(2000)})
     .then(r => r.json())
     .then(d => {
-      document.getElementById('clock').textContent   = d.time;
       document.getElementById('ip-chip').textContent = d.ip;
+      const _tp = d.time.split(':');
+      _clockBase = {h:parseInt(_tp[0]),m:parseInt(_tp[1]),s:parseInt(_tp[2])};
+      _clockBaseAt = Date.now();
+      tickClock();
 
       safeSet('c_saat', d.c_saat);
       safeSet('c_dol',  d.c_dol);
@@ -753,8 +982,30 @@ function fetchStatus() {
       }
 
       if (!alarmEditing) {
-        safeSet('alarm_h', d.alarm_h);
-        safeSet('alarm_m', d.alarm_m);
+        const isEnabled = d.alarm_enabled === true || d.alarm_enabled === 'true';
+        const isUseDate = d.alarm_use_date === true || d.alarm_use_date === 'true';
+        if (isEnabled) setAlarmMode(isUseDate ? 'dated' : 'weekly');
+        const at = document.getElementById('alarm_time');
+        if (at && document.activeElement !== at) {
+          if (isEnabled) {
+            at.value = String(d.alarm_h).padStart(2,'0')+':'+String(d.alarm_m).padStart(2,'0');
+          } else if (_clockBase) {
+            at.value = String(_clockBase.h).padStart(2,'0')+':'+String(_clockBase.m).padStart(2,'0');
+          }
+        }
+        const ad = document.getElementById('alarm_date');
+        if (ad && document.activeElement !== ad) {
+          if (isEnabled && isUseDate) {
+            ad.value = String(d.alarm_yr).padStart(4,'0')+'-'+String(d.alarm_mo).padStart(2,'0')+'-'+String(d.alarm_dy).padStart(2,'0');
+          } else if (d.iso_date) {
+            if (!ad.value) ad.value = d.iso_date;
+            ad.min = d.iso_date;
+          }
+        }
+        if (typeof d.alarm_days !== 'undefined') {
+          alarmDays = d.alarm_days;
+          updateDayUI();
+        }
       }
 
       const nightOn = d.night === 'on';
@@ -766,6 +1017,7 @@ function fetchStatus() {
 
       document.getElementById('lbl-mode').textContent = d.mode;
       document.getElementById('btn_mode0').classList.toggle('active', d.mode_num === 0);
+      document.getElementById('btn_mode6').classList.toggle('active', d.mode_num === 6);
 
       ['night_on','night_off','night_auto'].forEach(id =>
         document.getElementById('btn_'+id).classList.remove('active'));
@@ -784,27 +1036,29 @@ function fetchStatus() {
         animStop.style.display = 'none';
       }
 
+      document.getElementById('clock-date').textContent = d.date || '—';
+
       const firing  = d.alarm_firing  === true || d.alarm_firing  === 'true';
       const enabled = d.alarm_enabled === true || d.alarm_enabled === 'true';
       const badge     = document.getElementById('alarm-badge');
       const badgeWrap = document.getElementById('alarm-badge-wrap');
-      const stopBtn   = document.getElementById('btn_alarm_stop');
+      const fireRow   = document.getElementById('alarm-fire-row');
 
       if (firing) {
         badgeWrap.style.display = '';
         badge.textContent = '⚡ alarm!';
         badge.className   = 'alarm-badge firing';
-        stopBtn.style.display = 'block';
+        fireRow.style.display = 'block';
         document.getElementById('dot-mode').className = 'dot red';
       } else if (enabled) {
         badgeWrap.style.display = '';
         badge.textContent = String(d.alarm_h).padStart(2,'0')+':'+String(d.alarm_m).padStart(2,'0');
         badge.className   = 'alarm-badge on';
-        stopBtn.style.display = 'none';
+        fireRow.style.display = 'none';
         document.getElementById('dot-mode').className = 'dot on';
       } else {
         badgeWrap.style.display = 'none';
-        stopBtn.style.display   = 'none';
+        fireRow.style.display   = 'none';
         document.getElementById('dot-mode').className = 'dot on';
       }
     })
@@ -817,13 +1071,18 @@ function api(url, successMsg, cb) {
     .catch(() => toast('baglanti hatasi'));
 }
 
+function resetColors() {
+  if (!confirm('Renk ve parlaklık ayarları varsayılana dönecek. Devam?')) return;
+  api('/api/reset-colors', 'varsayılan renkler yuklendi', () => setTimeout(fetchStatus, 200));
+}
 function setColor(key, val) { api('/api/color?key='+key+'&val='+encodeURIComponent(val)); }
 function setBrightness(type, val) { api('/api/brightness?type='+type+'&val='+val, 'parlaklik: '+val); }
 function setColorBright(key, val) { api('/api/colorbright?key='+key+'&val='+val, key+' parlaklik: '+val); }
 
 function setMode(m) {
-  document.getElementById('btn_mode0').classList.add('active');
-  api('/api/mode?val='+m, 'normal moda donuldu');
+  document.getElementById('btn_mode0').classList.toggle('active', m === 0);
+  document.getElementById('btn_mode6').classList.toggle('active', m === 6);
+  api('/api/mode?val='+m, m === 0 ? 'normal moda donuldu' : 'saat dolumu modu');
 }
 
 function nightMode(val) {
@@ -862,18 +1121,33 @@ function setAlarm(enable) {
   clearTimeout(alarmBlurTimer);
   document.getElementById('alarm-section').classList.remove('editing');
   const hint = document.getElementById('alarm-hint');
-  hint.textContent = 'saat ve dakika gir, aktif et\'e bas';
+  hint.textContent = 'alarm saatini seç, aktif et\'e bas';
   hint.classList.remove('active');
-  const h = document.getElementById('alarm_h').value;
-  const m = document.getElementById('alarm_m').value;
-  if (enable && (h===''||m==='')) { toast('saat ve dakika girin'); return; }
-  api('/api/alarm?h='+h+'&m='+m+'&en='+(enable?1:0),
-    enable ? 'alarm: '+String(h).padStart(2,'0')+':'+String(m).padStart(2,'0') : 'alarm kapatildi',
-    () => setTimeout(fetchStatus, 200));
+  const timeVal = document.getElementById('alarm_time').value;
+  if (enable && !timeVal) { toast('saat seçin'); return; }
+  const parts = timeVal ? timeVal.split(':') : ['0','0'];
+  const h = parseInt(parts[0]), m = parseInt(parts[1]);
+  const isDated = alarmMode === 'dated';
+  let url = '/api/alarm?h='+h+'&m='+m+'&en='+(enable?1:0)
+           +'&days='+(isDated?0:alarmDays)+'&useDate='+(isDated?1:0);
+  if (isDated && enable) {
+    const dv = document.getElementById('alarm_date').value;
+    if (!dv) { toast('tarih seçin'); return; }
+    const dp = dv.split('-');
+    url += '&yr='+dp[0]+'&mo='+parseInt(dp[1])+'&dy='+parseInt(dp[2]);
+  }
+  const label = enable
+    ? 'alarm: '+String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+(isDated?' (tarihli)':'')
+    : 'alarm kapatildi';
+  api(url, label, () => setTimeout(fetchStatus, 200));
 }
 
 function stopAlarmBtn() {
   api('/api/alarm/stop', 'alarm durduruldu', () => setTimeout(fetchStatus, 200));
+}
+
+function snoozeAlarmBtn() {
+  api('/api/alarm/snooze', '5 dk ertelendi', () => setTimeout(fetchStatus, 200));
 }
 
 function setTime() {
@@ -885,6 +1159,7 @@ function setTime() {
 
 fetchStatus();
 setInterval(fetchStatus, 2000);
+setInterval(tickClock, 1000);
 </script>
 </body>
 </html>
@@ -897,6 +1172,11 @@ void handleApiStatus() {
     DateTime now = rtc.now();
     char timeBuf[9];
     sprintf(timeBuf, "%02d:%02d:%02d", now.hour(), now.minute(), now.second());
+    const char* DOW_TR[] = {"Paz","Pzt","Sal","Car","Per","Cum","Cmt"};
+    char dateBuf[22];
+    sprintf(dateBuf, "%s %02d.%02d.%04d", DOW_TR[now.dayOfTheWeek()], now.day(), now.month(), now.year());
+    char isoDate[12];
+    sprintf(isoDate, "%04d-%02d-%02d", now.year(), now.month(), now.day());
     unsigned long sinceSync = lastNtpSync ? (millis() - lastNtpSync) / 60000 : 0;
 
     String modeName;
@@ -907,11 +1187,13 @@ void handleApiStatus() {
         case 3: modeName = "nefes";     break;
         case 4: modeName = "meteor";    break;
         case 5: modeName = "radar";     break;
+        case 6: modeName = "saat dolumu"; break;
         default: modeName = "normal";
     }
 
     String json = "{";
     json += "\"time\":\""        + String(timeBuf)                   + "\",";
+    json += "\"date\":\""        + String(dateBuf)                   + "\",";
     json += "\"ip\":\""          + WiFi.localIP().toString()          + "\",";
     json += "\"mode_num\":"      + String(currentMode)                + ",";
     json += "\"mode\":\""        + modeName                           + "\",";
@@ -933,7 +1215,13 @@ void handleApiStatus() {
     json += "\"bright_ara\":"    + String(bright_ara)                 + ",";
     json += "\"alarm_h\":"       + String(myAlarm.hour)               + ",";
     json += "\"alarm_m\":"       + String(myAlarm.minute)             + ",";
-    json += "\"alarm_enabled\":" + String(myAlarm.enabled?"true":"false") + ",";
+    json += "\"alarm_enabled\":"  + String(myAlarm.enabled?"true":"false")  + ",";
+    json += "\"alarm_days\":"    + String(myAlarm.days)                    + ",";
+    json += "\"alarm_use_date\":" + String(myAlarm.useDate?"true":"false") + ",";
+    json += "\"alarm_yr\":"      + String(myAlarm.year)                    + ",";
+    json += "\"alarm_mo\":"      + String(myAlarm.month)                   + ",";
+    json += "\"alarm_dy\":"      + String(myAlarm.day)                     + ",";
+    json += "\"iso_date\":\""    + String(isoDate)                         + "\",";
     json += "\"alarm_firing\":"  + String(alarmFiring?"true":"false");
     json += "}";
     server.send(200, "application/json", json);
@@ -962,12 +1250,32 @@ void handleApiAlarm() {
         myAlarm.hour   = server.arg("h").toInt();
         myAlarm.minute = server.arg("m").toInt();
     }
+    if (server.hasArg("days"))    myAlarm.days    = (uint8_t)server.arg("days").toInt();
+    if (server.hasArg("useDate")) myAlarm.useDate = server.arg("useDate").toInt() == 1;
+    if (server.hasArg("yr"))      myAlarm.year    = server.arg("yr").toInt();
+    if (server.hasArg("mo"))      myAlarm.month   = server.arg("mo").toInt();
+    if (server.hasArg("dy"))      myAlarm.day     = server.arg("dy").toInt();
+    saveAlarmPrefs();
     server.send(200);
 }
 
 void handleApiAlarmStop() {
     stopAlarmNow();
     myAlarm.enabled = false;
+    saveAlarmPrefs();
+    server.send(200);
+}
+
+void handleApiAlarmSnooze() {
+    DateTime now = rtc.now();
+    int sm = now.minute() + 5;
+    int sh = now.hour() + (sm >= 60 ? 1 : 0);
+    myAlarm.minute  = sm % 60;
+    myAlarm.hour    = sh % 24;
+    myAlarm.enabled = true;
+    myAlarm.days    = 0;
+    stopAlarmNow();
+    saveAlarmPrefs();
     server.send(200);
 }
 
@@ -980,6 +1288,7 @@ void handleApiColor() {
     else if (key=="uc")   { c_uc_r=r;   c_uc_g=g;   c_uc_b=b;   }
     else if (key=="ana")  { c_ana_r=r;  c_ana_g=g;  c_ana_b=b;  }
     else if (key=="ara")  { c_ara_r=r;  c_ara_g=g;  c_ara_b=b;  }
+    savePrefs();
     server.send(200);
 }
 
@@ -992,6 +1301,7 @@ void handleApiColorBright() {
     else if (key=="uc")   bright_uc   = val;
     else if (key=="ana")  bright_ana  = val;
     else if (key=="ara")  bright_ara  = val;
+    savePrefs();
     server.send(200);
 }
 
@@ -1007,6 +1317,7 @@ void handleApiMode() {
     if (!server.hasArg("val")) { server.send(400); return; }
     int m = server.arg("val").toInt();
     if (m == 0) stopAlarmNow();
+    else if (m == 6) { currentMode = 6; animRunning = false; strip.setBrightness(isNightMode ? brightness_night : brightness_day); }
     else { currentMode=m; animRunning=true; animStep=0; lastAnimUpdate=millis(); }
     server.send(200);
 }
@@ -1030,12 +1341,27 @@ void handleApiSetTime() {
     server.send(200);
 }
 
+void handleApiResetColors() {
+    prefs.begin("clock", false);
+    prefs.clear();
+    prefs.end();
+    c_saat_r=0;   c_saat_g=255; c_saat_b=0;
+    c_dol_r=255;  c_dol_g=0;   c_dol_b=255;
+    c_uc_r=255;   c_uc_g=0;    c_uc_b=255;
+    c_ana_r=255;  c_ana_g=255; c_ana_b=255;
+    c_ara_r=255;  c_ara_g=255; c_ara_b=255;
+    bright_saat=255; bright_dol=18; bright_uc=168; bright_ana=195; bright_ara=114;
+    server.send(200);
+}
+
 // =====================================================================
 // SETUP & LOOP
 // =====================================================================
 
 void setup() {
     Serial.begin(115200);
+    loadPrefs();
+    loadAlarmPrefs();
 
     pinMode(BUTTON_HOUR_UP,   INPUT_PULLUP);
     pinMode(BUTTON_HOUR_DOWN, INPUT_PULLUP);
@@ -1050,6 +1376,7 @@ void setup() {
     ArduinoOTA.setHostname("analog-clock-ESP32");
     ArduinoOTA.onEnd([]()                { Serial.println("OTA tamam."); });
     ArduinoOTA.onError([](ota_error_t e) { Serial.printf("OTA hata [%u]\n", e); });
+    ArduinoOTA.setPassword("gaca"); 
     ArduinoOTA.begin();
 
     server.on("/",               handleRoot);
@@ -1057,7 +1384,8 @@ void setup() {
     server.on("/api/anim",       handleApiAnim);
     server.on("/api/anim/stop",  handleApiAnimStop);
     server.on("/api/alarm",      handleApiAlarm);
-    server.on("/api/alarm/stop", handleApiAlarmStop);
+    server.on("/api/alarm/stop",   handleApiAlarmStop);
+    server.on("/api/alarm/snooze", handleApiAlarmSnooze);
     server.on("/api/color",      handleApiColor);
     server.on("/api/colorbright",handleApiColorBright);
     server.on("/api/brightness", handleApiBrightness);
@@ -1065,6 +1393,7 @@ void setup() {
     server.on("/api/night",      handleApiNight);
     server.on("/api/ntp",        handleApiNtp);
     server.on("/api/settime",    handleApiSetTime);
+    server.on("/api/reset-colors", handleApiResetColors);
     server.begin();
 
     if (!rtc.begin()) { Serial.println("RTC yok!"); while (1); }
@@ -1091,9 +1420,10 @@ void loop() {
 
     checkAlarm(now);
 
-    if (!alarmFiring && currentMode == 0 &&
+    if (!alarmFiring && (currentMode == 0 || currentMode == 6) &&
         now.minute() == 0 && now.second() == 0 && now.hour() != lastHour) {
         lastHour       = now.hour();
+        prevMode       = currentMode;
         currentMode    = 1;
         animRunning    = true;
         animStep       = 0;
@@ -1129,6 +1459,12 @@ void loop() {
         runMeteorAnimation();
     } else if (currentMode == 5) {
         runRadarAnimation();
+    } else if (currentMode == 6) {
+        static unsigned long lastHFUpdate = 0;
+        if (millis() - lastHFUpdate >= 20) {
+            lastHFUpdate = millis();
+            runHourFillDisplay(now);
+        }
     } else {
         currentMode = 0;
         static unsigned long lastUpdate = 0;

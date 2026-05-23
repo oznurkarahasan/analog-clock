@@ -9,6 +9,8 @@
 RTC_DS3231 rtc;
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
+long x = 1;
+
 void setup() {
   Serial.begin(115200);
   if (!rtc.begin()) {
@@ -47,11 +49,16 @@ void updateClockDisplay(DateTime t) {
 
   strip.setPixelColor(mn, strip.Color(255, 40, 0)); 
 
-  if (millis() % 2000 < 1900) { 
-    strip.setPixelColor(hrPos, strip.Color(0, 255, 0));
+  x++;
+  if (x >= 510) x = 1;
+
+  uint32_t hourColor;
+  if (x <= 255) {
+    hourColor = strip.Color(x, 0, 20);
   } else {
-    strip.setPixelColor(hrPos, strip.Color(0, 0, 0));
+    hourColor = strip.Color(510 - x, 20, 20);
   }
+  strip.setPixelColor(hrPos, hourColor);
 
   strip.setPixelColor(sc, Wheel(((millis() / 15) & 255))); 
   
