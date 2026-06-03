@@ -33,3 +33,6 @@ This project is an analog clock application based on ESP32, using NeoPixel LEDs.
 
 ### Clock
 ![Clock](assets/semantic.png)
+
+### Web Server
+![Clock](assets/webserver.png)
